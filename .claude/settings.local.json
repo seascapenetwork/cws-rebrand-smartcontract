@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(forge init:*)",
+      "Bash(forge install:*)",
+      "Bash(forge build)",
+      "Bash(forge test:*)",
+      "Bash(cast wallet new:*)",
+      "Bash(cast wallet new-mnemonic:*)",
+      "Bash(forge create:*)",
+      "Bash(src/Staking.sol:Staking)",
+      "Bash(cast code:*)",
+      "Bash(cast wallet address:*)",
+      "Bash(cast balance:*)",
+      "Bash(cast block:*)",
+      "Bash(cast nonce:*)",
+      "Bash(cast compute-address:*)",
+      "Bash(tee:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
