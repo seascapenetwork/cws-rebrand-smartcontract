@@ -22,7 +22,8 @@
       "Bash(0xFF3808FAf86c7F439610128c5D5CA99e209A6063 )",
       "Bash(cast tx:*)",
       "Bash(cat:*)",
-      "Bash(forge build:*)"
+      "Bash(forge build:*)",
+      "Bash(forge fmt:*)"
     ],
     "deny": [],
     "ask": []

@@ -7,8 +7,8 @@
 ### 核心功能
 
 1. **灵活的质押支持**
-   - 支持LP代币、ERC20代币和BNB原生代币质押
-   - 支持多种奖励代币类型（ERC20/BNB）
+   - 支持ERC20代币质押
+   - 支持多种奖励代币类型（ERC20）
    - 锁定期质押，活动结束后一次性提取
 
 2. **线性奖励释放**
@@ -16,11 +16,22 @@
    - 奖励按时间线性释放
    - Session结束后统一领取
 
-3. **签到激励系统**
+3. **Boost奖励系统(签到激励)**
    - 每次签到需间隔至少5分钟(300秒)
    - 每次签到boost点数+1,无上限
-   - 基于TVL占比和boost点数计算签到奖励
-   - 公式：`签到奖励 = 签到奖池 × (用户质押×boost) / Σ(所有用户质押×boost)`
+   - 使用**分池权重法**计算boost奖励,由两部分组成:
+     - **Stake部分** (γ权重): 按质押占比分配,与boost无关
+     - **Hybrid部分** (1-γ权重): 按质押×boost的归一化乘积分配
+   - 公式:
+     ```
+     用户boost奖励 = stake部分奖励 + hybrid部分奖励
+
+     stake部分奖励 = γ × 总boost奖池 × (用户质押 / 总质押)
+
+     hybrid部分奖励 = (1-γ) × 总boost奖池 × (用户s_i×b_i) / Σ(s_j×b_j)
+       其中: s_i = 用户质押/总质押, b_i = 用户boost/总boost点数
+     ```
+   - gamma参数可配置(默认0.6),范围[0, 1],只能在session开始前设置
 
 4. **Session管理**
    - 支持多个独立session
@@ -29,9 +40,9 @@
 
 5. **安全机制**
    - 重入保护（ReentrancyGuard）
-   - 暂停功能（Pausable）
    - 防重复提取检查
    - Owner权限管理
+   - Session时间不重叠验证
 
 ## 技术规范
 
@@ -46,18 +57,20 @@
 
 ```solidity
 struct Session {
-    address stakingToken;           // 质押代币
-    address rewardToken;            // 奖励代币
-    address checkInRewardToken;     // 签到奖励代币
-    uint256 totalReward;            // 总奖励
-    uint256 checkInRewardPool;      // 签到奖励池
+    address stakingToken;           // 质押代币 (ERC20)
+    address rewardToken;            // LP质押奖励代币
+    address checkInRewardToken;     // 签到奖励代币 (boost奖励)
+    uint256 totalReward;            // LP质押总奖励数量
+    uint256 checkInRewardPool;      // 签到奖励池总数量 (boost奖励池)
     uint256 startTime;              // 开始时间
     uint256 endTime;                // 结束时间
     uint256 totalStaked;            // 总质押量
     uint256 rewardPerSecond;        // 每秒奖励
     uint256 accRewardPerShare;      // 累积每份额奖励
     uint256 lastRewardTime;         // 上次更新时间
-    uint256 totalWeightedStake;     // 加权质押总量
+    uint256 totalWeightedStake;     // 加权质押总量 [保留用于兼容]
+    uint256 totalBoostPoints;       // 全局boost点数总和 Σ(boost)
+    uint256 gamma;                  // boost奖励分配参数(scaled by 1e18) 默认0.6
     bool active;                    // 是否激活
 }
 
@@ -74,19 +87,20 @@ struct UserInfo {
 
 #### Owner函数
 
-- `createSession()` - 创建新的质押session
-- `pause()` / `unpause()` - 暂停/恢复合约
+- `createSession(params)` - 创建新的质押session
+- `setGamma(sessionId, gamma)` - 设置session的gamma参数(仅在session开始前)
 
 #### 用户函数
 
 - `deposit(sessionId, amount)` - 质押代币
 - `checkIn(sessionId)` - 签到增加boost(需间隔5分钟)
-- `withdraw(sessionId)` - 提取本金和奖励
+- `withdraw(sessionId)` - 提取本金和所有奖励(session结束后)
 
 #### 查询函数
 
-- `pendingReward(sessionId, user)` - 查询待领取LP奖励
-- `pendingCheckInReward(sessionId, user)` - 查询签到奖励
+- `pendingReward(sessionId, user)` - 查询待领取LP质押奖励
+- `pendingBoostReward(sessionId, user)` - 查询boost奖励(新)
+- `getPendingRewards(sessionId, user)` - 同时查询质押奖励和boost奖励(新)
 - `getSessionInfo(sessionId)` - 获取session信息
 - `getUserInfo(sessionId, user)` - 获取用户信息
 
@@ -179,15 +193,17 @@ forge test --gas-report
 ### 测试覆盖
 
 - ✅ Session创建和验证
-- ✅ 质押功能（ERC20和BNB）
+- ✅ Gamma参数设置(边界值、权限控制、时间限制)
+- ✅ 质押功能（ERC20）
 - ✅ 签到机制（5分钟冷却）
 - ✅ Boost递增和累积
 - ✅ 多次签到测试
 - ✅ 提取功能
-- ✅ 奖励计算准确性
-- ✅ 签到奖励分配（基于boost）
-- ✅ 暂停功能
-- ✅ 边界条件和错误处理
+- ✅ LP奖励计算准确性
+- ✅ Boost奖励分配（分池权重法）
+- ✅ 不同gamma值下的奖励分配
+- ✅ 边界条件（gamma=0、gamma=1、无人签到等）
+- ✅ getPendingRewards函数测试
 - ✅ 多session场景
 - ✅ Gas优化验证
 
@@ -214,35 +230,39 @@ forge test --gas-report
 
 ## 示例场景
 
-### 场景1: 标准LP质押
+### 场景: 标准LP质押与Boost奖励
 
 ```
 Session配置:
-- 质押代币: CWS-BNB LP
-- 奖励代币: ASTER
-- 签到奖励池: 5,000 ASTER
-- 总奖励: 10,000 ASTER
+- 质押代币: CWS-USDT LP
+- LP奖励代币: ASTER
+- Boost奖励池: 5,000 ASTER
+- LP总奖励: 10,000 ASTER
 - 持续时间: 30天
+- Gamma: 0.6 (默认)
 
-用户A: 质押1,000 LP，签到1次(boost=1)
-  → LP奖励 + 签到奖励(基于boost=1计算)
+用户A: 质押3,000 LP，签到1次(boost=1)
+  → LP奖励: 10,000 × 0.3 = 3,000 ASTER
+  → Boost奖励:
+     - Stake部分: 5,000 × 0.6 × 0.3 = 900 ASTER
+     - Hybrid部分: 根据归一化的stake×boost计算
+     - 总boost奖励 ≈ 1,100 ASTER
 
-用户B: 质押1,000 LP，签到5次(boost=5)
-  → LP奖励 + 签到奖励(基于boost=5计算，是用户A的5倍)
+用户B: 质押3,000 LP，签到5次(boost=5)
+  → LP奖励: 10,000 × 0.3 = 3,000 ASTER
+  → Boost奖励:
+     - Stake部分: 5,000 × 0.6 × 0.3 = 900 ASTER
+     - Hybrid部分: 因boost更高,获得更多
+     - 总boost奖励 ≈ 1,900 ASTER
 
-用户C: 质押1,000 LP，不签到(boost=0)
-  → LP奖励 + 0签到奖励
-```
+用户C: 质押4,000 LP，不签到(boost=0)
+  → LP奖励: 10,000 × 0.4 = 4,000 ASTER
+  → Boost奖励:
+     - Stake部分: 5,000 × 0.6 × 0.4 = 1,200 ASTER
+     - Hybrid部分: 0 (没有签到)
+     - 总boost奖励 = 1,200 ASTER
 
-### 场景2: BNB质押
-
-```
-Session配置:
-- 质押代币: BNB (address(0))
-- 奖励代币: ASTER
-- 签到奖励: ASTER
-
-用户通过msg.value发送BNB进行质押
+说明: Boost奖励既考虑质押占比,也激励签到行为,实现公平与激励的平衡
 ```
 
 ## 部署地址
@@ -258,6 +278,31 @@ Session配置:
 
 ## 更新日志
 
+### v3.0.0 - Boost奖励算法重构
+
+**重大变更**:
+- ✅ 实现**分池权重法**计算boost奖励
+- ✅ 新增`gamma`参数控制stake/hybrid权重分配(默认0.6)
+- ✅ 新增`totalBoostPoints`字段追踪全局boost点数
+- ✅ 新增`setGamma()`函数允许在session开始前设置gamma
+- ✅ 新增`pendingBoostReward()`函数(替代`pendingCheckInReward`)
+- ✅ 新增`getPendingRewards()`函数同时查询两种奖励
+- ✅ 移除BNB支持,仅支持ERC20代币
+- ✅ 移除Pausable功能
+
+**算法改进**:
+- Boost奖励 = Stake部分(γ权重) + Hybrid部分(1-γ权重)
+- Stake部分: 按质押占比分配,确保基础公平
+- Hybrid部分: 按归一化的(质押×boost)分配,激励签到行为
+- 边界处理: 无人签到时hybrid部分也按stake分配
+
+**测试覆盖**:
+- 新增gamma参数测试(边界值、权限、时间限制)
+- 新增分池权重法测试(不同gamma值、不同boost组合)
+- 新增getPendingRewards函数测试
+- 更新所有boost奖励相关测试
+- 总计50+测试用例
+
 ### v2.0.0 - 签到机制升级
 
 **重大变更**:
@@ -266,13 +311,10 @@ Session配置:
 - ✅ Boost点数改为每次签到+1,无上限
 - ✅ 使用`uint40`存储时间戳,优化gas消耗
 - ✅ 更新`UserInfo`结构体:`hasCheckedIn` → `lastCheckInTime`
-- ✅ 保持签到奖励计算逻辑不变(基于boost和质押量)
 
 **Gas优化**:
 - 首次签到: ~71,851 gas
 - 后续签到: ~8,141 gas (节省89%)
-
-**测试覆盖**: 40个测试用例全部通过
 
 ## License
 

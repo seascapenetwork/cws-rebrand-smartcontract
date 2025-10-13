@@ -449,11 +449,9 @@ contract Staking is Ownable, ReentrancyGuard {
         // 标记已提取，防止重复提取
         user.hasWithdrawn = true;
 
-        // 更新全局状态
-        session.totalStaked -= stakedAmount;
-        if (user.boost > 0) {
-            session.totalWeightedStake -= (user.amount * user.boost);
-        }
+        // 注意: 我们不更新 totalStaked 和 totalWeightedStake
+        // 因为boost奖励应该基于session结束时的最终状态，而不是提取时的动态状态
+        // 如果更新这些值，会导致后提取的用户获得不公平的高额奖励
 
         // 转出所有代币
         _transferWithdrawals(session, stakedAmount, lpReward, checkInReward);
@@ -500,8 +498,10 @@ contract Staking is Ownable, ReentrancyGuard {
             // 注意 Σ(s_i * b_i) = Σ((stake_i/totalStaked) * (boost_i/totalBoost))
             //                    = (1/(totalStaked * totalBoost)) * Σ(stake_i * boost_i)
             //                    = totalWeightedStake / (totalStaked * totalBoost)
-            // 所以 sumSB1e18 = totalWeightedStake * SCALER / (totalStaked * totalBoostPoints)
-            uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints / SCALER);
+            // 因为 sb_i 已经是 1e18 scaled, sumSB 也应该是 1e18 scaled
+            // sumSB1e18 = (totalWeightedStake / totalStaked) * (SCALER / totalBoostPoints)
+            //           = (totalWeightedStake * SCALER) / (totalStaked * totalBoostPoints)
+            uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
 
             if (sumSB1e18 > 0) {
                 rewardFromHybrid = (hybridPart * sb1e18) / sumSB1e18;
@@ -548,6 +548,14 @@ contract Staking is Ownable, ReentrancyGuard {
 
         // 转入质押代币 (仅支持ERC20)
         IERC20(session.stakingToken).safeTransferFrom(msg.sender, address(this), _amount);
+
+        // 如果用户已有boost,需要更新totalWeightedStake
+        if (user.boost > 0) {
+            // 从旧的amount*boost变为新的amount*boost
+            uint256 oldWeightedStake = user.amount * user.boost;
+            uint256 newWeightedStake = (user.amount + _amount) * user.boost;
+            session.totalWeightedStake = session.totalWeightedStake - oldWeightedStake + newWeightedStake;
+        }
 
         // 更新用户状态
         user.amount += _amount;
