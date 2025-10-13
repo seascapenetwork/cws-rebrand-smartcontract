@@ -63,9 +63,9 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     struct UserInfo {
         uint256 amount;                 // 用户质押数量
         uint256 rewardDebt;             // 奖励债务(用于计算待领取奖励)
-        uint256 boost;                  // 用户boost点数(签到后为1，未签到为0)
+        uint256 boost;                  // 用户boost点数(每次签到+1，无上限)
+        uint40 lastCheckInTime;         // 最后一次签到时间戳(用于5分钟冷却检查)
         bool hasWithdrawn;              // 是否已提取(防止重复提取)
-        bool hasCheckedIn;              // 是否已签到
     }
 
     // ============================================
@@ -263,7 +263,7 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         _processDeposit(_sessionId, _amount);
     }
 
-    /// @notice 用户签到(每个session只能签到一次)
+    /// @notice 用户签到(需距离上次签到至少5分钟)
     /// @param _sessionId Session ID
     function checkIn(uint256 _sessionId)
         external
@@ -276,14 +276,17 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         Session storage session = sessions[_sessionId];
 
         require(user.amount > 0, "Must stake before check-in");
-        require(!user.hasCheckedIn, "Already checked in");
+        require(block.timestamp >= user.lastCheckInTime + 300, "Check-in cooldown not expired");
 
-        // 标记已签到，boost从0变为1
-        user.hasCheckedIn = true;
-        user.boost = 1;
+        // 更新全局加权质押量: 从 (amount * oldBoost) 变为 (amount * newBoost)
+        uint256 oldWeightedStake = user.amount * user.boost;
+        user.boost += 1;
+        uint256 newWeightedStake = user.amount * user.boost;
 
-        // 更新全局加权质押量：从 (amount * 0) 变为 (amount * 1)
-        session.totalWeightedStake += user.amount;
+        session.totalWeightedStake = session.totalWeightedStake - oldWeightedStake + newWeightedStake;
+
+        // 更新最后签到时间
+        user.lastCheckInTime = uint40(block.timestamp);
 
         emit CheckedIn(_sessionId, msg.sender, block.timestamp);
     }
@@ -353,7 +356,7 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         Session storage session = sessions[_sessionId];
         UserInfo storage user = userInfo[_sessionId][_user];
 
-        if (!user.hasCheckedIn || session.totalWeightedStake == 0) {
+        if (user.boost == 0 || session.totalWeightedStake == 0) {
             return 0;
         }
 
@@ -435,7 +438,7 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
 
         // 更新全局状态
         session.totalStaked -= stakedAmount;
-        if (user.hasCheckedIn) {
+        if (user.boost > 0) {
             session.totalWeightedStake -= (user.amount * user.boost);
         }
 
@@ -450,7 +453,7 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     /// @param user 用户信息
     /// @return 签到奖励数量
     function _calculateCheckInReward(uint256 _sessionId, UserInfo storage user) internal view returns (uint256) {
-        if (!user.hasCheckedIn) {
+        if (user.boost == 0) {
             return 0;
         }
 
@@ -501,11 +504,6 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
             IERC20(session.stakingToken).safeTransferFrom(msg.sender, address(this), _amount);
         } else {
             require(msg.value == _amount, "Incorrect BNB amount");
-        }
-
-        // 更新全局加权质押量（如果用户已签到）
-        if (user.hasCheckedIn) {
-            session.totalWeightedStake = session.totalWeightedStake - (user.amount * user.boost) + (user.amount + _amount) * user.boost;
         }
 
         // 更新用户状态

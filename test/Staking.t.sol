@@ -29,6 +29,9 @@ contract StakingTest is Test {
     address public user3;
 
     uint256 constant INITIAL_BALANCE = 1000000 * 10**18;
+    uint256 constant CHECKIN_COOLDOWN = 300; // 5 minutes
+
+    event CheckedIn(uint256 indexed sessionId, address indexed user, uint256 timestamp);
 
     function setUp() public {
         owner = address(this);
@@ -275,11 +278,42 @@ contract StakingTest is Test {
         assertEq(amount, firstDeposit + secondDeposit);
     }
 
+    function testDepositDoesNotResetBoost() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 2000 * 10**18);
+
+        // 第一次质押
+        staking.deposit(sessionId, 1000 * 10**18);
+
+        // 签到
+        staking.checkIn(sessionId);
+
+        // 等待5分钟后再次签到
+        vm.warp(block.timestamp + 301);
+        staking.checkIn(sessionId);
+
+        // 验证boost = 2
+        (, , uint256 boostBefore, , ) = staking.userInfo(sessionId, user1);
+        assertEq(boostBefore, 2);
+
+        // 第二次质押 (复存)
+        staking.deposit(sessionId, 1000 * 10**18);
+
+        // 验证boost没有被重置
+        (, , uint256 boostAfter, , ) = staking.userInfo(sessionId, user1);
+        assertEq(boostAfter, 2);
+
+        vm.stopPrank();
+    }
+
     // ============================================
-    // 测试: checkIn
+    // 测试: checkIn - 新的5分钟冷却机制
     // ============================================
 
-    function testCheckIn() public {
+    function testCheckInFirstTime() public {
         uint256 sessionId = _createTestSession();
         vm.warp(block.timestamp + 1 days + 1);
 
@@ -288,14 +322,51 @@ contract StakingTest is Test {
         lpToken.approve(address(staking), 1000 * 10**18);
         staking.deposit(sessionId, 1000 * 10**18);
 
-        // 签到
+        // 首次签到
+        vm.expectEmit(true, true, false, true);
+        emit CheckedIn(sessionId, user1, block.timestamp);
         staking.checkIn(sessionId);
         vm.stopPrank();
 
         // 验证
-        (, , uint256 boost, , bool hasCheckedIn) = staking.userInfo(sessionId, user1);
-        assertTrue(hasCheckedIn);
+        (, , uint256 boost, uint40 lastCheckInTime, ) = staking.userInfo(sessionId, user1);
         assertEq(boost, 1);
+        assertEq(lastCheckInTime, block.timestamp);
+    }
+
+    function testCheckInMultipleTimes() public {
+        uint256 sessionId = _createTestSession();
+        uint256 startTime = block.timestamp + 1 days + 1;
+        vm.warp(startTime);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+
+        // 第1次签到
+        staking.checkIn(sessionId);
+        (, , uint256 boost1, , ) = staking.userInfo(sessionId, user1);
+        assertEq(boost1, 1);
+
+        // 等待5分钟后第2次签到
+        vm.warp(startTime + 300);
+        staking.checkIn(sessionId);
+        (, , uint256 boost2, , ) = staking.userInfo(sessionId, user1);
+        assertEq(boost2, 2);
+
+        // 等待5分钟后第3次签到
+        vm.warp(startTime + 600);
+        staking.checkIn(sessionId);
+        (, , uint256 boost3, , ) = staking.userInfo(sessionId, user1);
+        assertEq(boost3, 3);
+
+        // 等待更长时间后第4次签到
+        vm.warp(startTime + 1600);
+        staking.checkIn(sessionId);
+        (, , uint256 boost4, , ) = staking.userInfo(sessionId, user1);
+        assertEq(boost4, 4);
+
+        vm.stopPrank();
     }
 
     function testCannotCheckInWithoutStaking() public {
@@ -307,17 +378,108 @@ contract StakingTest is Test {
         staking.checkIn(sessionId);
     }
 
-    function testCannotCheckInTwice() public {
+    function testCannotCheckInBeforeCooldown() public {
         uint256 sessionId = _createTestSession();
         vm.warp(block.timestamp + 1 days + 1);
 
         vm.startPrank(user1);
         lpToken.approve(address(staking), 1000 * 10**18);
         staking.deposit(sessionId, 1000 * 10**18);
+
+        // 第一次签到
         staking.checkIn(sessionId);
 
-        vm.expectRevert("Already checked in");
+        // 立即尝试第二次签到 (应该失败)
+        vm.expectRevert("Check-in cooldown not expired");
         staking.checkIn(sessionId);
+
+        // 等待299秒 (不够5分钟)
+        vm.warp(block.timestamp + 299);
+        vm.expectRevert("Check-in cooldown not expired");
+        staking.checkIn(sessionId);
+
+        // 等待300秒 (刚好5分钟) - 应该成功
+        vm.warp(block.timestamp + 1);
+        staking.checkIn(sessionId);
+
+        vm.stopPrank();
+    }
+
+    function testCheckInCooldownExactly5Minutes() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+
+        uint256 firstCheckInTime = block.timestamp;
+        staking.checkIn(sessionId);
+
+        // 等待刚好300秒
+        vm.warp(firstCheckInTime + 300);
+        staking.checkIn(sessionId); // 应该成功
+
+        (, , uint256 boost, , ) = staking.userInfo(sessionId, user1);
+        assertEq(boost, 2);
+
+        vm.stopPrank();
+    }
+
+    function testMultipleUsersCheckInIndependently() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // 用户1质押和签到
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // 用户2在2分钟后质押和签到
+        vm.warp(block.timestamp + 120);
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 2000 * 10**18);
+        staking.deposit(sessionId, 2000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // 3分钟后，用户1可以再次签到 (距离首次5分钟)
+        vm.warp(block.timestamp + 180);
+        vm.prank(user1);
+        staking.checkIn(sessionId);
+
+        // 但用户2不能 (只过了3分钟)
+        vm.prank(user2);
+        vm.expectRevert("Check-in cooldown not expired");
+        staking.checkIn(sessionId);
+
+        // 验证boost
+        (, , uint256 boost1, , ) = staking.userInfo(sessionId, user1);
+        (, , uint256 boost2, , ) = staking.userInfo(sessionId, user2);
+        assertEq(boost1, 2);
+        assertEq(boost2, 1);
+    }
+
+    function testCheckInBoostAccumulatesOverTime() public {
+        uint256 sessionId = _createTestSession();
+        uint256 startTime = block.timestamp + 1 days + 1;
+        vm.warp(startTime);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+
+        // 模拟一天内多次签到 (每5分钟一次)
+        for (uint256 i = 0; i < 10; i++) {
+            staking.checkIn(sessionId);
+            vm.warp(startTime + (300 * (i + 1)));
+        }
+
+        (, , uint256 finalBoost, , ) = staking.userInfo(sessionId, user1);
+        assertEq(finalBoost, 10);
+
         vm.stopPrank();
     }
 
@@ -423,8 +585,42 @@ contract StakingTest is Test {
         vm.prank(user2);
         staking.withdraw(sessionId);
 
-        // 验证用户2没有签到奖励
+        // 验证用户2没有签到奖励 (boost = 0)
         assertEq(checkInRewardToken.balanceOf(user2), user2CheckInRewardBefore);
+    }
+
+    function testWithdrawWithMultipleCheckIns() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        uint256 user1Deposit = 5000 * 10**18;
+        uint256 user2Deposit = 5000 * 10**18;
+
+        // 用户1质押并签到1次
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), user1Deposit);
+        staking.deposit(sessionId, user1Deposit);
+        staking.checkIn(sessionId); // boost = 1
+        vm.stopPrank();
+
+        // 用户2质押并签到2次
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), user2Deposit);
+        staking.deposit(sessionId, user2Deposit);
+        staking.checkIn(sessionId); // boost = 1
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId); // boost = 2
+        vm.stopPrank();
+
+        // 时间前进到session结束
+        vm.warp(block.timestamp + 31 days);
+
+        // 获取签到奖励
+        uint256 user1CheckIn = staking.pendingCheckInReward(sessionId, user1);
+        uint256 user2CheckIn = staking.pendingCheckInReward(sessionId, user2);
+
+        // 用户2的签到奖励应该是用户1的2倍 (相同质押量，但boost是2倍)
+        assertApproxEqRel(user2CheckIn, user1CheckIn * 2, 0.01e18);
     }
 
     // ============================================
@@ -496,6 +692,75 @@ contract StakingTest is Test {
         assertApproxEqRel(user2CheckIn, 2000 * 10**18, 0.01e18);
     }
 
+    function testCheckInRewardWithDifferentBoosts() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        uint256 depositAmount = 1000 * 10**18;
+
+        // 用户1: 1次签到 (boost = 1)
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), depositAmount);
+        staking.deposit(sessionId, depositAmount);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // 用户2: 2次签到 (boost = 2)
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), depositAmount);
+        staking.deposit(sessionId, depositAmount);
+        staking.checkIn(sessionId);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // 用户3: 3次签到 (boost = 3)
+        vm.startPrank(user3);
+        lpToken.approve(address(staking), depositAmount);
+        staking.deposit(sessionId, depositAmount);
+        staking.checkIn(sessionId);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // 时间前进到session结束
+        vm.warp(block.timestamp + 31 days);
+
+        // 获取签到奖励
+        uint256 reward1 = staking.pendingCheckInReward(sessionId, user1);
+        uint256 reward2 = staking.pendingCheckInReward(sessionId, user2);
+        uint256 reward3 = staking.pendingCheckInReward(sessionId, user3);
+
+        // 总加权 = 1000*1 + 1000*2 + 1000*3 = 6000
+        // user1应得: 5000 * 1000/6000 = 833.33
+        // user2应得: 5000 * 2000/6000 = 1666.66
+        // user3应得: 5000 * 3000/6000 = 2500
+
+        assertApproxEqRel(reward1, 833333333333333333333, 0.01e18);
+        assertApproxEqRel(reward2, 1666666666666666666666, 0.01e18);
+        assertApproxEqRel(reward3, 2500 * 10**18, 0.01e18);
+    }
+
+    function testPendingRewardBeforeSessionEnds() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+        vm.stopPrank();
+
+        // 时间前进15天 (一半)
+        vm.warp(block.timestamp + 15 days);
+
+        uint256 pendingReward = staking.pendingReward(sessionId, user1);
+
+        // 应该获得大约一半的奖励
+        assertApproxEqRel(pendingReward, 5000 * 10**18, 0.05e18); // 5% tolerance
+    }
+
     // ============================================
     // 测试: 暂停功能
     // ============================================
@@ -519,6 +784,40 @@ contract StakingTest is Test {
         vm.expectRevert();
         staking.deposit(sessionId, 1000 * 10**18);
         vm.stopPrank();
+    }
+
+    function testCannotCheckInWhenPaused() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+        vm.stopPrank();
+
+        staking.pause();
+
+        vm.prank(user1);
+        vm.expectRevert();
+        staking.checkIn(sessionId);
+    }
+
+    function testCannotWithdrawWhenPaused() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 31 days);
+
+        staking.pause();
+
+        vm.prank(user1);
+        vm.expectRevert();
+        staking.withdraw(sessionId);
     }
 
     // ============================================
@@ -571,6 +870,188 @@ contract StakingTest is Test {
         vm.startPrank(user1);
         lpToken.approve(address(staking), 2000 * 10**18);
         staking.deposit(session2, 2000 * 10**18);
+        vm.stopPrank();
+    }
+
+    function testUserBoostIndependentAcrossSessions() public {
+        // Session 1
+        uint256 session1 = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(session1, 1000 * 10**18);
+        staking.checkIn(session1);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(session1);
+        vm.stopPrank();
+
+        // 验证session1的boost
+        (, , uint256 boost1, , ) = staking.userInfo(session1, user1);
+        assertEq(boost1, 2);
+
+        // 等到session1结束
+        vm.warp(block.timestamp + 31 days);
+
+        // 创建session2
+        uint256 totalReward = 20000 * 10**18;
+        uint256 checkInReward = 10000 * 10**18;
+        rewardToken.approve(address(staking), totalReward);
+        checkInRewardToken.approve(address(staking), checkInReward);
+
+        staking.createSession(
+            Staking.CreateSessionParams({
+                stakingToken: address(lpToken),
+                rewardToken: address(rewardToken),
+                checkInRewardToken: address(checkInRewardToken),
+                totalReward: totalReward,
+                checkInRewardPool: checkInReward,
+                startTime: block.timestamp + 1 days,
+                endTime: block.timestamp + 31 days
+            })
+        );
+
+        uint256 session2 = 2;
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // 用户在session2质押
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(session2, 1000 * 10**18);
+        vm.stopPrank();
+
+        // 验证session2的boost从0开始
+        (, , uint256 boost2Before, , ) = staking.userInfo(session2, user1);
+        assertEq(boost2Before, 0);
+
+        // 在session2签到
+        vm.prank(user1);
+        staking.checkIn(session2);
+
+        (, , uint256 boost2After, , ) = staking.userInfo(session2, user1);
+        assertEq(boost2After, 1);
+
+        // session1的boost不受影响
+        (, , uint256 boost1Final, , ) = staking.userInfo(session1, user1);
+        assertEq(boost1Final, 2);
+    }
+
+    // ============================================
+    // 测试: 边界情况
+    // ============================================
+
+    function testCheckInAtSessionEndTime() public {
+        uint256 sessionId = _createTestSession();
+
+        // 获取session信息
+        (, , , , , , uint256 endTime, , , , , , ) = staking.sessions(sessionId);
+
+        // 在session开始时质押
+        vm.warp(block.timestamp + 1 days + 1);
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+
+        // 在session结束时签到
+        vm.warp(endTime);
+        staking.checkIn(sessionId); // 应该成功
+
+        vm.stopPrank();
+    }
+
+    function testCheckInAfterSessionEnds() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+
+        // session结束后尝试签到
+        vm.warp(block.timestamp + 32 days);
+        vm.expectRevert("Session ended");
+        staking.checkIn(sessionId);
+
+        vm.stopPrank();
+    }
+
+    function testWithdrawWithoutCheckIn() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 31 days);
+
+        // 验证没有签到奖励
+        uint256 checkInReward = staking.pendingCheckInReward(sessionId, user1);
+        assertEq(checkInReward, 0);
+
+        vm.prank(user1);
+        staking.withdraw(sessionId);
+    }
+
+    function testGetSessionInfo() public {
+        uint256 sessionId = _createTestSession();
+
+        Staking.Session memory session = staking.getSessionInfo(sessionId);
+
+        assertEq(session.stakingToken, address(lpToken));
+        assertEq(session.rewardToken, address(rewardToken));
+        assertEq(session.checkInRewardToken, address(checkInRewardToken));
+        assertEq(session.totalReward, 10000 * 10**18);
+        assertEq(session.checkInRewardPool, 5000 * 10**18);
+        assertTrue(session.active);
+    }
+
+    function testGetUserInfo() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        Staking.UserInfo memory userInfo = staking.getUserInfo(sessionId, user1);
+
+        assertEq(userInfo.amount, 1000 * 10**18);
+        assertEq(userInfo.boost, 1);
+        assertGt(userInfo.lastCheckInTime, 0);
+        assertFalse(userInfo.hasWithdrawn);
+    }
+
+    // ============================================
+    // 测试: Gas 优化验证
+    // ============================================
+
+    function testCheckInGasUsage() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 1000 * 10**18);
+        staking.deposit(sessionId, 1000 * 10**18);
+
+        // 测试第一次签到的gas
+        uint256 gasBefore = gasleft();
+        staking.checkIn(sessionId);
+        uint256 gasUsed = gasBefore - gasleft();
+
+        emit log_named_uint("First checkIn gas used", gasUsed);
+
+        // 测试后续签到的gas
+        vm.warp(block.timestamp + 300);
+        gasBefore = gasleft();
+        staking.checkIn(sessionId);
+        gasUsed = gasBefore - gasleft();
+
+        emit log_named_uint("Second checkIn gas used", gasUsed);
+
         vm.stopPrank();
     }
 
