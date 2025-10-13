@@ -92,7 +92,7 @@ contract StakingTest is Test {
             uint256 _checkInRewardPool,
             uint256 _startTime,
             uint256 _endTime,
-            ,,,,,
+            ,,,,,,,
         ) = staking.sessions(1);
 
         assertEq(stakingToken, address(lpToken));
@@ -104,27 +104,8 @@ contract StakingTest is Test {
         assertEq(_endTime, endTime);
     }
 
-    function testCreateSessionWithBNB() public {
-        uint256 totalReward = 10 ether;
-        uint256 checkInReward = 5 ether;
-        uint256 startTime = block.timestamp + 1 days;
-        uint256 endTime = startTime + 30 days;
-
-        // 创建BNB session
-        staking.createSession{value: totalReward + checkInReward}(
-            Staking.CreateSessionParams({
-                stakingToken: address(lpToken),
-                rewardToken: address(0), // BNB as reward
-                checkInRewardToken: address(0), // BNB as checkIn reward
-                totalReward: totalReward,
-                checkInRewardPool: checkInReward,
-                startTime: startTime,
-                endTime: endTime
-            })
-        );
-
-        assertEq(staking.currentSessionId(), 1);
-    }
+    // BNB support has been removed
+    // function testCreateSessionWithBNB() public { ... }
 
     function testCannotCreateSessionWithOverlappingTime() public {
         uint256 totalReward = 10000 * 10**18;
@@ -219,22 +200,8 @@ contract StakingTest is Test {
         assertEq(amount, depositAmount);
     }
 
-    function testDepositBNB() public {
-        // 创建BNB质押session
-        uint256 sessionId = _createBNBStakingSession();
-
-        // 时间前进到session开始
-        vm.warp(block.timestamp + 1 days + 1);
-
-        // 用户1质押BNB
-        uint256 depositAmount = 1 ether;
-        vm.prank(user1);
-        staking.deposit{value: depositAmount}(sessionId, depositAmount);
-
-        // 验证
-        (uint256 amount,,,, ) = staking.userInfo(sessionId, user1);
-        assertEq(amount, depositAmount);
-    }
+    // BNB support has been removed
+    // function testDepositBNB() public { ... }
 
     function testCannotDepositBeforeSessionStarts() public {
         uint256 sessionId = _createTestSession();
@@ -616,8 +583,8 @@ contract StakingTest is Test {
         vm.warp(block.timestamp + 31 days);
 
         // 获取签到奖励
-        uint256 user1CheckIn = staking.pendingCheckInReward(sessionId, user1);
-        uint256 user2CheckIn = staking.pendingCheckInReward(sessionId, user2);
+        uint256 user1CheckIn = staking.pendingBoostReward(sessionId, user1);
+        uint256 user2CheckIn = staking.pendingBoostReward(sessionId, user2);
 
         // 用户2的签到奖励应该是用户1的2倍 (相同质押量，但boost是2倍)
         assertApproxEqRel(user2CheckIn, user1CheckIn * 2, 0.01e18);
@@ -684,8 +651,8 @@ contract StakingTest is Test {
         vm.warp(block.timestamp + 31 days);
 
         // 获取签到奖励
-        uint256 user1CheckIn = staking.pendingCheckInReward(sessionId, user1);
-        uint256 user2CheckIn = staking.pendingCheckInReward(sessionId, user2);
+        uint256 user1CheckIn = staking.pendingBoostReward(sessionId, user1);
+        uint256 user2CheckIn = staking.pendingBoostReward(sessionId, user2);
 
         // 用户1应该获得60%的签到奖励，用户2获得40%
         assertApproxEqRel(user1CheckIn, 3000 * 10**18, 0.01e18);
@@ -729,9 +696,9 @@ contract StakingTest is Test {
         vm.warp(block.timestamp + 31 days);
 
         // 获取签到奖励
-        uint256 reward1 = staking.pendingCheckInReward(sessionId, user1);
-        uint256 reward2 = staking.pendingCheckInReward(sessionId, user2);
-        uint256 reward3 = staking.pendingCheckInReward(sessionId, user3);
+        uint256 reward1 = staking.pendingBoostReward(sessionId, user1);
+        uint256 reward2 = staking.pendingBoostReward(sessionId, user2);
+        uint256 reward3 = staking.pendingBoostReward(sessionId, user3);
 
         // 总加权 = 1000*1 + 1000*2 + 1000*3 = 6000
         // user1应得: 5000 * 1000/6000 = 833.33
@@ -762,63 +729,8 @@ contract StakingTest is Test {
     }
 
     // ============================================
-    // 测试: 暂停功能
+    // Pausable功能已移除
     // ============================================
-
-    function testPause() public {
-        staking.pause();
-        assertTrue(staking.paused());
-
-        staking.unpause();
-        assertFalse(staking.paused());
-    }
-
-    function testCannotDepositWhenPaused() public {
-        uint256 sessionId = _createTestSession();
-        vm.warp(block.timestamp + 1 days + 1);
-
-        staking.pause();
-
-        vm.startPrank(user1);
-        lpToken.approve(address(staking), 1000 * 10**18);
-        vm.expectRevert();
-        staking.deposit(sessionId, 1000 * 10**18);
-        vm.stopPrank();
-    }
-
-    function testCannotCheckInWhenPaused() public {
-        uint256 sessionId = _createTestSession();
-        vm.warp(block.timestamp + 1 days + 1);
-
-        vm.startPrank(user1);
-        lpToken.approve(address(staking), 1000 * 10**18);
-        staking.deposit(sessionId, 1000 * 10**18);
-        vm.stopPrank();
-
-        staking.pause();
-
-        vm.prank(user1);
-        vm.expectRevert();
-        staking.checkIn(sessionId);
-    }
-
-    function testCannotWithdrawWhenPaused() public {
-        uint256 sessionId = _createTestSession();
-        vm.warp(block.timestamp + 1 days + 1);
-
-        vm.startPrank(user1);
-        lpToken.approve(address(staking), 1000 * 10**18);
-        staking.deposit(sessionId, 1000 * 10**18);
-        vm.stopPrank();
-
-        vm.warp(block.timestamp + 31 days);
-
-        staking.pause();
-
-        vm.prank(user1);
-        vm.expectRevert();
-        staking.withdraw(sessionId);
-    }
 
     // ============================================
     // 测试: 多session场景
@@ -944,7 +856,7 @@ contract StakingTest is Test {
         uint256 sessionId = _createTestSession();
 
         // 获取session信息
-        (, , , , , , uint256 endTime, , , , , , ) = staking.sessions(sessionId);
+        (, , , , , , uint256 endTime, , , , , , , , ) = staking.sessions(sessionId);
 
         // 在session开始时质押
         vm.warp(block.timestamp + 1 days + 1);
@@ -987,7 +899,7 @@ contract StakingTest is Test {
         vm.warp(block.timestamp + 31 days);
 
         // 验证没有签到奖励
-        uint256 checkInReward = staking.pendingCheckInReward(sessionId, user1);
+        uint256 checkInReward = staking.pendingBoostReward(sessionId, user1);
         assertEq(checkInReward, 0);
 
         vm.prank(user1);
@@ -1071,31 +983,6 @@ contract StakingTest is Test {
         staking.createSession(
             Staking.CreateSessionParams({
                 stakingToken: address(lpToken),
-                rewardToken: address(rewardToken),
-                checkInRewardToken: address(checkInRewardToken),
-                totalReward: totalReward,
-                checkInRewardPool: checkInReward,
-                startTime: startTime,
-                endTime: endTime
-            })
-        );
-
-        return staking.currentSessionId();
-    }
-
-    function _createBNBStakingSession() internal returns (uint256) {
-        uint256 totalReward = 10000 * 10**18;
-        uint256 checkInReward = 5000 * 10**18;
-        uint256 startTime = block.timestamp + 1 days;
-        uint256 endTime = startTime + 30 days;
-
-        // 授权ERC20奖励代币
-        rewardToken.approve(address(staking), totalReward);
-        checkInRewardToken.approve(address(staking), checkInReward);
-
-        staking.createSession(
-            Staking.CreateSessionParams({
-                stakingToken: address(0), // BNB staking
                 rewardToken: address(rewardToken),
                 checkInRewardToken: address(checkInRewardToken),
                 totalReward: totalReward,
