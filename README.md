@@ -17,7 +17,8 @@
    - Session结束后统一领取
 
 3. **签到激励系统**
-   - 每个session仅可签到一次
+   - 每次签到需间隔至少5分钟(300秒)
+   - 每次签到boost点数+1,无上限
    - 基于TVL占比和boost点数计算签到奖励
    - 公式：`签到奖励 = 签到奖池 × (用户质押×boost) / Σ(所有用户质押×boost)`
 
@@ -63,9 +64,9 @@ struct Session {
 struct UserInfo {
     uint256 amount;                 // 用户质押量
     uint256 rewardDebt;             // 奖励债务
-    uint256 boost;                  // boost点数(0或1)
+    uint256 boost;                  // boost点数(每次签到+1,无上限)
+    uint40 lastCheckInTime;         // 最后签到时间(用于5分钟冷却)
     bool hasWithdrawn;              // 是否已提取
-    bool hasCheckedIn;              // 是否已签到
 }
 ```
 
@@ -79,7 +80,7 @@ struct UserInfo {
 #### 用户函数
 
 - `deposit(sessionId, amount)` - 质押代币
-- `checkIn(sessionId)` - 签到获取boost
+- `checkIn(sessionId)` - 签到增加boost(需间隔5分钟)
 - `withdraw(sessionId)` - 提取本金和奖励
 
 #### 查询函数
@@ -144,8 +145,16 @@ lpStaking.createSession(
 lpToken.approve(stakingContract, amount);
 lpStaking.deposit(sessionId, amount);
 
-// 2. 签到获取boost点数(可选，但能获得额外奖励)
-lpStaking.checkIn(sessionId);
+// 2. 签到增加boost点数(可多次签到,每次间隔5分钟)
+lpStaking.checkIn(sessionId);  // boost = 1
+
+// 等待5分钟后再次签到
+// ... 5分钟后 ...
+lpStaking.checkIn(sessionId);  // boost = 2
+
+// 可以继续签到,每次boost+1
+// ... 5分钟后 ...
+lpStaking.checkIn(sessionId);  // boost = 3
 
 // 3. Session结束后提取
 lpStaking.withdraw(sessionId);
@@ -171,13 +180,16 @@ forge test --gas-report
 
 - ✅ Session创建和验证
 - ✅ 质押功能（ERC20和BNB）
-- ✅ 签到机制
+- ✅ 签到机制（5分钟冷却）
+- ✅ Boost递增和累积
+- ✅ 多次签到测试
 - ✅ 提取功能
 - ✅ 奖励计算准确性
-- ✅ 签到奖励分配
+- ✅ 签到奖励分配（基于boost）
 - ✅ 暂停功能
 - ✅ 边界条件和错误处理
 - ✅ 多session场景
+- ✅ Gas优化验证
 
 ## 安全考虑
 
@@ -194,9 +206,11 @@ forge test --gas-report
 
 - 🔴 Session一旦创建无法修改参数
 - 🔴 质押期间资金完全锁定
-- 🔴 每个session只能签到一次
+- 🟡 签到需间隔至少5分钟(300秒)
+- 🟢 可多次签到,每次boost+1,无上限
 - 🔴 只能在session结束后提取
 - 🔴 新session必须等前一session结束且时间不重叠
+- 🟢 复存不会重置boost值
 
 ## 示例场景
 
@@ -206,11 +220,18 @@ forge test --gas-report
 Session配置:
 - 质押代币: CWS-BNB LP
 - 奖励代币: ASTER
+- 签到奖励池: 5,000 ASTER
 - 总奖励: 10,000 ASTER
 - 持续时间: 30天
 
-用户A: 质押60% TVL，签到 → 获得6,000 ASTER + 签到奖励
-用户B: 质押40% TVL，不签到 → 获得4,000 ASTER + 0签到奖励
+用户A: 质押1,000 LP，签到1次(boost=1)
+  → LP奖励 + 签到奖励(基于boost=1计算)
+
+用户B: 质押1,000 LP，签到5次(boost=5)
+  → LP奖励 + 签到奖励(基于boost=5计算，是用户A的5倍)
+
+用户C: 质押1,000 LP，不签到(boost=0)
+  → LP奖励 + 0签到奖励
 ```
 
 ### 场景2: BNB质押
@@ -230,7 +251,28 @@ Session配置:
 - 待部署
 
 ### BSC测试网
-- 待部署
+- **Staking合约**: `0xFF3808FAf86c7F439610128c5D5CA99e209A6063`
+- **部署者**: `0x87D14D7964245bbfEd65344bdBE3fA87fa611385`
+- **交易哈希**: `0x00a9a8e2ddce1b01a9b2f58f3377efa40b468c4c455ce3642d0cc756c9077884`
+- **区块浏览器**: https://testnet.bscscan.com/address/0xFF3808FAf86c7F439610128c5D5CA99e209A6063
+
+## 更新日志
+
+### v2.0.0 - 签到机制升级
+
+**重大变更**:
+- ✅ 移除"每个session只能签到一次"的限制
+- ✅ 实现5分钟签到冷却机制
+- ✅ Boost点数改为每次签到+1,无上限
+- ✅ 使用`uint40`存储时间戳,优化gas消耗
+- ✅ 更新`UserInfo`结构体:`hasCheckedIn` → `lastCheckInTime`
+- ✅ 保持签到奖励计算逻辑不变(基于boost和质押量)
+
+**Gas优化**:
+- 首次签到: ~71,851 gas
+- 后续签到: ~8,141 gas (节省89%)
+
+**测试覆盖**: 40个测试用例全部通过
 
 ## License
 

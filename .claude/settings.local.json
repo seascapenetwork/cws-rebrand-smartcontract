@@ -15,7 +15,14 @@
       "Bash(cast block:*)",
       "Bash(cast nonce:*)",
       "Bash(cast compute-address:*)",
-      "Bash(tee:*)"
+      "Bash(tee:*)",
+      "Bash(cast call:*)",
+      "Bash(cast abi-encode:*)",
+      "Bash(forge verify-contract:*)",
+      "Bash(0xFF3808FAf86c7F439610128c5D5CA99e209A6063 )",
+      "Bash(cast tx:*)",
+      "Bash(cat:*)",
+      "Bash(forge build:*)"
     ],
     "deny": [],
     "ask": []

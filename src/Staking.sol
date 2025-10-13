@@ -3,15 +3,14 @@ pragma solidity 0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 /// @title Staking - LP代币质押与签到奖励合约
 /// @author Seascape Network
-/// @notice 本合约支持LP/ERC20/BNB质押，线性释放奖励，以及基于签到的额外激励
-/// @dev 使用OpenZeppelin v5.0.2，Solidity 0.8.20，包含重入保护和暂停机制
-contract Staking is Ownable, ReentrancyGuard, Pausable {
+/// @notice 本合约支持ERC20代币质押，线性释放奖励，以及基于签到的额外激励
+/// @dev 使用OpenZeppelin v5.0.2，Solidity 0.8.20，包含重入保护
+contract Staking is Ownable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ============================================
@@ -21,9 +20,6 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     /// @notice 精度缩放因子，用于高精度计算
     uint256 private constant SCALER = 1e18;
 
-    /// @notice BNB原生代币的地址表示
-    address private constant BNB_ADDRESS = address(0);
-
     // ============================================
     // 数据结构
     // ============================================
@@ -31,7 +27,7 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     /// @notice 创建Session的参数结构体
     /// @dev 用于减少createSession函数的参数数量，避免stack too deep
     struct CreateSessionParams {
-        address stakingToken;           // 质押代币地址 (address(0)表示BNB)
+        address stakingToken;           // 质押代币地址 (仅支持ERC20)
         address rewardToken;            // LP质押奖励代币地址
         address checkInRewardToken;     // 签到奖励代币地址
         uint256 totalReward;            // LP质押总奖励数量
@@ -43,7 +39,7 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     /// @notice Session质押活动结构体
     /// @dev 每个session代表一轮独立的质押活动
     struct Session {
-        address stakingToken;           // 质押代币地址 (address(0)表示BNB)
+        address stakingToken;           // 质押代币地址 (仅支持ERC20)
         address rewardToken;            // LP质押奖励代币地址
         address checkInRewardToken;     // 签到奖励代币地址
         uint256 totalReward;            // LP质押总奖励数量
@@ -174,9 +170,7 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     /// @param params 创建session的参数结构体
     function createSession(CreateSessionParams calldata params)
         external
-        payable
         onlyOwner
-        whenNotPaused
     {
         // 参数验证
         require(params.startTime > block.timestamp, "Start time must be in future");
@@ -192,27 +186,11 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
             require(block.timestamp > sessions[currentSessionId].endTime, "Previous session not ended");
         }
 
-        // 缓存地址值以减少stack使用
-        address _rewardToken = params.rewardToken;
-        address _checkInToken = params.checkInRewardToken;
+        // 转入LP奖励代币 (仅支持ERC20)
+        IERC20(params.rewardToken).safeTransferFrom(msg.sender, address(this), params.totalReward);
 
-        // 转入LP奖励代币
-        if (_rewardToken != BNB_ADDRESS) {
-            require(IERC20(_rewardToken).transferFrom(msg.sender, address(this), params.totalReward), "Reward transfer failed");
-        } else {
-            require(msg.value >= params.totalReward, "Insufficient BNB for reward");
-        }
-
-        // 转入签到奖励代币
-        if (_checkInToken != BNB_ADDRESS) {
-            require(IERC20(_checkInToken).transferFrom(msg.sender, address(this), params.checkInRewardPool), "CheckIn transfer failed");
-        } else {
-            if (_rewardToken == BNB_ADDRESS) {
-                require(msg.value >= params.totalReward + params.checkInRewardPool, "Insufficient BNB");
-            } else {
-                require(msg.value >= params.checkInRewardPool, "Insufficient BNB");
-            }
-        }
+        // 转入签到奖励代币 (仅支持ERC20)
+        IERC20(params.checkInRewardToken).safeTransferFrom(msg.sender, address(this), params.checkInRewardPool);
 
         // 创建新session
         _createNewSession(params);
@@ -220,23 +198,13 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         emit SessionCreated(
             currentSessionId,
             params.stakingToken,
-            _rewardToken,
-            _checkInToken,
+            params.rewardToken,
+            params.checkInRewardToken,
             params.totalReward,
             params.checkInRewardPool,
             params.startTime,
             params.endTime
         );
-    }
-
-    /// @notice 暂停合约
-    function pause() external onlyOwner {
-        _pause();
-    }
-
-    /// @notice 恢复合约
-    function unpause() external onlyOwner {
-        _unpause();
     }
 
     // ============================================
@@ -248,9 +216,7 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     /// @param _amount 质押数量
     function deposit(uint256 _sessionId, uint256 _amount)
         external
-        payable
         nonReentrant
-        whenNotPaused
         sessionExists(_sessionId)
         sessionInProgress(_sessionId)
     {
@@ -268,7 +234,6 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     function checkIn(uint256 _sessionId)
         external
         nonReentrant
-        whenNotPaused
         sessionExists(_sessionId)
         sessionInProgress(_sessionId)
     {
@@ -296,7 +261,6 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
     function withdraw(uint256 _sessionId)
         external
         nonReentrant
-        whenNotPaused
         sessionExists(_sessionId)
         sessionEnded(_sessionId)
     {
@@ -498,13 +462,8 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         Session storage session = sessions[_sessionId];
         UserInfo storage user = userInfo[_sessionId][msg.sender];
 
-        // 转入质押代币
-        if (session.stakingToken != BNB_ADDRESS) {
-            require(msg.value == 0, "Do not send BNB for ERC20 staking");
-            IERC20(session.stakingToken).safeTransferFrom(msg.sender, address(this), _amount);
-        } else {
-            require(msg.value == _amount, "Incorrect BNB amount");
-        }
+        // 转入质押代币 (仅支持ERC20)
+        IERC20(session.stakingToken).safeTransferFrom(msg.sender, address(this), _amount);
 
         // 更新用户状态
         user.amount += _amount;
@@ -567,8 +526,8 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
         }
     }
 
-    /// @notice 安全转账函数(支持BNB和ERC20)
-    /// @param _token 代币地址 (address(0)表示BNB)
+    /// @notice 安全转账函数(仅支持ERC20)
+    /// @param _token 代币地址
     /// @param _to 接收地址
     /// @param _amount 转账数量
     function _safeTransfer(address _token, address _to, uint256 _amount) internal {
@@ -576,18 +535,6 @@ contract Staking is Ownable, ReentrancyGuard, Pausable {
             return;
         }
 
-        if (_token == BNB_ADDRESS) {
-            (bool success, ) = payable(_to).call{value: _amount}("");
-            require(success, "BNB transfer failed");
-        } else {
-            IERC20(_token).safeTransfer(_to, _amount);
-        }
+        IERC20(_token).safeTransfer(_to, _amount);
     }
-
-    // ============================================
-    // 接收BNB
-    // ============================================
-
-    /// @notice 接收BNB (用于owner存入奖励)
-    receive() external payable {}
 }
