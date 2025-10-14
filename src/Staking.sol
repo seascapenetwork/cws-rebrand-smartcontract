@@ -471,6 +471,11 @@ contract Staking is Ownable, ReentrancyGuard {
             return 0;
         }
 
+        // 如果用户从未签到，不应获得boost奖励
+        if (user.boost == 0) {
+            return 0;
+        }
+
         uint256 totalBoostPool = session.checkInRewardPool;
         uint256 gamma = session.gamma;
 

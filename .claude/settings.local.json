@@ -23,7 +23,8 @@
       "Bash(cast tx:*)",
       "Bash(cat:*)",
       "Bash(forge build:*)",
-      "Bash(forge fmt:*)"
+      "Bash(forge fmt:*)",
+      "Bash(cast abi-decode:*)"
     ],
     "deny": [],
     "ask": []
