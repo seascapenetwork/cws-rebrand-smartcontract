@@ -342,6 +342,55 @@ contract Staking is Ownable, ReentrancyGuard {
         return _calculateCheckInReward(_sessionId, user);
     }
 
+    /// @notice 查询用户的boost奖励分解(stake部分和hybrid部分)
+    /// @param _sessionId Session ID
+    /// @param _user 用户地址
+    /// @return stakeReward stake部分的奖励: γ × totalBoostPool × (userStake / totalStake)
+    /// @return hybridReward hybrid部分的奖励: (1-γ) × totalBoostPool × (userStake × userBoost) / Σ(allStake × allBoost)
+    function getBoostRewardBreakdown(uint256 _sessionId, address _user)
+        external
+        view
+        sessionExists(_sessionId)
+        returns (uint256 stakeReward, uint256 hybridReward)
+    {
+        Session storage session = sessions[_sessionId];
+        UserInfo storage user = userInfo[_sessionId][_user];
+
+        // 基础检查
+        if (user.amount == 0 || session.totalStaked == 0 || user.boost == 0) {
+            return (0, 0);
+        }
+
+        uint256 totalBoostPool = session.checkInRewardPool;
+        uint256 gamma = session.gamma;
+
+        // 1) 计算stake部分: γ × totalBoostPool × (userStake / totalStake)
+        uint256 stakePart = (totalBoostPool * gamma) / SCALER;
+        uint256 stakeShare1e18 = (user.amount * SCALER) / session.totalStaked;
+        stakeReward = (stakePart * stakeShare1e18) / SCALER;
+
+        // 2) 计算hybrid部分: (1-γ) × totalBoostPool × (userStake × userBoost) / Σ(allStake × allBoost)
+        uint256 hybridPart = totalBoostPool - stakePart;
+
+        if (session.totalBoostPoints == 0) {
+            // 边界处理: 如果没人签到,hybrid部分也按stake分
+            hybridReward = (hybridPart * stakeShare1e18) / SCALER;
+        } else {
+            uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
+            uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
+            uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
+
+            if (sumSB1e18 > 0) {
+                hybridReward = (hybridPart * sb1e18) / sumSB1e18;
+            } else {
+                // fallback: 按stake分
+                hybridReward = (hybridPart * stakeShare1e18) / SCALER;
+            }
+        }
+
+        return (stakeReward, hybridReward);
+    }
+
     /// @notice 查询用户的所有待领取奖励(质押奖励 + boost奖励)
     /// @param _sessionId Session ID
     /// @param _user 用户地址

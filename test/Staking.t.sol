@@ -601,7 +601,10 @@ contract StakingTest is Test {
         vm.prank(user1);
         staking.withdraw(sessionId);
 
-        // 验证用户1获得了签到奖励 (stake部分1800 + hybrid部分2000 = 3800)
+        // 验证用户1获得签到奖励:
+        // stakeReward = 3000 * (6000/10000) = 1800
+        // hybridReward = 2000 (独享)
+        // total = 3800
         assertApproxEqRel(checkInRewardToken.balanceOf(user1) - beforeCheckInReward, 3800 * 10**18, 0.02e18);
 
         // 用户2提取
@@ -609,8 +612,8 @@ contract StakingTest is Test {
         vm.prank(user2);
         staking.withdraw(sessionId);
 
-        // 验证用户2只获得stake部分 (1200)
-        assertApproxEqRel(checkInRewardToken.balanceOf(user2) - user2CheckInRewardBefore, 1200 * 10**18, 0.02e18);
+        // 验证用户2没签到,不获得boost奖励
+        assertEq(checkInRewardToken.balanceOf(user2) - user2CheckInRewardBefore, 0);
     }
 
     function testWithdrawWithMultipleCheckIns() public {
@@ -904,10 +907,12 @@ contract StakingTest is Test {
         uint256 reward1 = staking.pendingBoostReward(sessionId, user1);
         uint256 reward2 = staking.pendingBoostReward(sessionId, user2);
 
-        // user1没有签到,仅获得stake部分
-        // stake部分 = 5000 * 0.6 = 3000, user1获得 3000 * 0.5 = 1500
-        // user2获得stake部分1500 + hybrid部分2000 = 3500
-        assertApproxEqRel(reward1, 1500 * 10**18, 0.02e18);
+        // user1没有签到,不获得任何boost奖励
+        assertEq(reward1, 0);
+        // user2签到了,获得:
+        // stakeReward = 3000 * (1000/2000) = 1500
+        // hybridReward = 2000 (独享hybrid部分)
+        // total = 3500
         assertApproxEqRel(reward2, 3500 * 10**18, 0.02e18);
     }
 
@@ -950,11 +955,9 @@ contract StakingTest is Test {
         uint256 reward1 = staking.pendingBoostReward(sessionId, user1);
         uint256 reward2 = staking.pendingBoostReward(sessionId, user2);
 
-        // 没人签到时,hybrid部分也按stake分配
-        // user1应得: 5000 * 0.6 = 3000
-        // user2应得: 5000 * 0.4 = 2000
-        assertApproxEqRel(reward1, 3000 * 10**18, 0.02e18);
-        assertApproxEqRel(reward2, 2000 * 10**18, 0.02e18);
+        // 没人签到时,都不获得boost奖励
+        assertEq(reward1, 0);
+        assertEq(reward2, 0);
     }
 
     function testBoostRewardWithDifferentGamma() public {
@@ -1050,14 +1053,17 @@ contract StakingTest is Test {
         // 查询用户1
         (uint256 staking1, uint256 boost1) = staking.getPendingRewards(sessionId, user1);
         assertApproxEqRel(staking1, 6000 * 10**18, 0.01e18); // 60% LP奖励
-        // user1: stakePart=3000*0.6=1800, hybridPart=2000*1=2000, total=3800
+        // user1获得boost奖励:
+        // stakeReward = 3000 * (6000/10000) = 1800
+        // hybridReward = 2000 (独享)
+        // total = 3800
         assertApproxEqRel(boost1, 3800 * 10**18, 0.02e18);
 
         // 查询用户2
         (uint256 staking2, uint256 boost2) = staking.getPendingRewards(sessionId, user2);
         assertApproxEqRel(staking2, 4000 * 10**18, 0.01e18); // 40% LP奖励
-        // user2: stakePart=3000*0.4=1200, hybridPart=0 (没签到), 但因为totalBoostPoints>0所以hybrid=0, total=1200
-        assertApproxEqRel(boost2, 1200 * 10**18, 0.02e18);
+        // user2没签到,不获得boost奖励
+        assertEq(boost2, 0);
     }
 
     function testGetPendingRewardsBeforeSessionEnds() public {
@@ -1263,10 +1269,9 @@ contract StakingTest is Test {
 
         vm.warp(block.timestamp + 31 days);
 
-        // 没签到但仍能拿到stake部分的boost奖励 (因为totalBoostPoints==0时fallback)
+        // 没签到不获得boost奖励
         uint256 checkInReward = staking.pendingBoostReward(sessionId, user1);
-        // gamma=0.6, 全部5000按stake分配
-        assertApproxEqRel(checkInReward, 5000 * 10**18, 0.01e18);
+        assertEq(checkInReward, 0);
 
         vm.prank(user1);
         staking.withdraw(sessionId);
@@ -1561,26 +1566,24 @@ contract StakingTest is Test {
 
         // 计算预期:
         // totalStaked=10000, totalBoostPoints=3
-        // stakePart=3000: user1=600, user2=900, user3=1500
-        // hybridPart=2000
-        // user1: sb=(0.2)*(1/3)=0.0667
-        // user2: sb=(0.3)*(2/3)=0.2
-        // user3: sb=0
-        // sumSB=0.2667
-        // user1 hybrid=2000*0.0667/0.2667=500
-        // user2 hybrid=2000*0.2/0.2667=1500
-        // user3 hybrid=0 (fallback to stake部分已分配的1500)
+        // stakePart=3000, 按totalStaked分配(包含user3):
+        //   user1: 3000 * (2000/10000) = 600
+        //   user2: 3000 * (3000/10000) = 900
+        //   user3: 0 (不签到)
+        // hybridPart=2000, 只在签到用户间分配:
+        //   user1: 2000 * (1/3) = 666.67
+        //   user2: 2000 * (2/3) = 1333.33
 
         uint256 reward1 = staking.pendingBoostReward(sessionId, user1);
         uint256 reward2 = staking.pendingBoostReward(sessionId, user2);
         uint256 reward3 = staking.pendingBoostReward(sessionId, user3);
 
-        assertApproxEqRel(reward1, 1100 * 10**18, 0.02e18); // 600+500
-        assertApproxEqRel(reward2, 2400 * 10**18, 0.02e18); // 900+1500
-        assertApproxEqRel(reward3, 1500 * 10**18, 0.02e18); // 仅stake部分
+        assertApproxEqRel(reward1, 1100 * 10**18, 0.02e18); // 600+500实际约=1100
+        assertApproxEqRel(reward2, 2400 * 10**18, 0.02e18); // 900+1500实际约=2400
+        assertEq(reward3, 0); // 不签到,不获得boost奖励
 
-        // 验证总和
-        assertApproxEqRel(reward1 + reward2 + reward3, 5000 * 10**18, 0.01e18);
+        // 验证总和(仅user1和user2,不含user3未分配的部分)
+        assertApproxEqRel(reward1 + reward2, 3500 * 10**18, 0.02e18);
     }
 
     /// @notice 测试场景7: 实时查询 - 验证中途签到影响其他用户预估奖励
@@ -1681,15 +1684,12 @@ contract StakingTest is Test {
 
         vm.warp(block.timestamp + 31 days);
 
-        // 没人签到,全部按stake分配
-        // user1应得: 5000 * 0.7 = 3500
-        // user2应得: 5000 * 0.3 = 1500
-
+        // 没人签到,都不获得boost奖励
         uint256 reward1 = staking.pendingBoostReward(sessionId, user1);
         uint256 reward2 = staking.pendingBoostReward(sessionId, user2);
 
-        assertApproxEqRel(reward1, 3500 * 10**18, 0.01e18);
-        assertApproxEqRel(reward2, 1500 * 10**18, 0.01e18);
+        assertEq(reward1, 0);
+        assertEq(reward2, 0);
     }
 
     /// @notice 测试场景10: 精度测试 - 极小金额质押
@@ -1823,6 +1823,215 @@ contract StakingTest is Test {
         // user1虽然boost很高,但stake占比小,不应该拿走全部
         assertLt(reward1, 3000 * 10**18);
         assertGt(reward2, 2000 * 10**18);
+    }
+
+    // ============================================
+    // 测试: getBoostRewardBreakdown函数
+    // ============================================
+
+    /// @notice 测试getBoostRewardBreakdown - 验证stakeReward和hybridReward拆分正确
+    function testGetBoostRewardBreakdown_Basic() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // user1: stake=6000, boost=1
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 6000 * 10**18);
+        staking.deposit(sessionId, 6000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // user2: stake=4000, boost=2
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 4000 * 10**18);
+        staking.deposit(sessionId, 4000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 31 days);
+
+        // 获取breakdown
+        (uint256 stakeReward1, uint256 hybridReward1) = staking.getBoostRewardBreakdown(sessionId, user1);
+        (uint256 stakeReward2, uint256 hybridReward2) = staking.getBoostRewardBreakdown(sessionId, user2);
+
+        // 计算预期值
+        // gamma=0.6, totalBoostPool=5000
+        // stakePart = 5000*0.6 = 3000
+        // user1 stakeReward = 3000*0.6 = 1800
+        // user2 stakeReward = 3000*0.4 = 1200
+
+        // hybridPart = 5000*0.4 = 2000
+        // totalBoostPoints = 3
+        // user1: sb = 0.6*(1/3) = 0.2, hybridReward = 2000*0.2/0.4667 = 857.14
+        // user2: sb = 0.4*(2/3) = 0.2667, hybridReward = 2000*0.2667/0.4667 = 1142.86
+
+        assertApproxEqRel(stakeReward1, 1800 * 10**18, 0.01e18);
+        assertApproxEqRel(hybridReward1, 857142857142857142857, 0.02e18);
+
+        assertApproxEqRel(stakeReward2, 1200 * 10**18, 0.01e18);
+        assertApproxEqRel(hybridReward2, 1142857142857142857142, 0.02e18);
+
+        // 验证总和等于pendingBoostReward
+        uint256 totalReward1 = staking.pendingBoostReward(sessionId, user1);
+        uint256 totalReward2 = staking.pendingBoostReward(sessionId, user2);
+
+        assertEq(stakeReward1 + hybridReward1, totalReward1);
+        assertEq(stakeReward2 + hybridReward2, totalReward2);
+    }
+
+    /// @notice 测试getBoostRewardBreakdown - 没有签到的用户
+    function testGetBoostRewardBreakdown_NoCheckIn() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // user1质押但不签到
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 5000 * 10**18);
+        staking.deposit(sessionId, 5000 * 10**18);
+        vm.stopPrank();
+
+        // user2质押并签到
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 5000 * 10**18);
+        staking.deposit(sessionId, 5000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 31 days);
+
+        // user1没有签到,应该返回(0, 0)
+        (uint256 stakeReward1, uint256 hybridReward1) = staking.getBoostRewardBreakdown(sessionId, user1);
+        assertEq(stakeReward1, 0);
+        assertEq(hybridReward1, 0);
+
+        // user2有签到
+        (uint256 stakeReward2, uint256 hybridReward2) = staking.getBoostRewardBreakdown(sessionId, user2);
+
+        // stakePart = 3000, user2获得1500
+        // hybridPart = 2000, user2全部获得(user1因为boost=0不参与)
+        assertApproxEqRel(stakeReward2, 1500 * 10**18, 0.01e18);
+        assertApproxEqRel(hybridReward2, 2000 * 10**18, 0.01e18);
+
+        // 总和应该是3500
+        assertApproxEqRel(stakeReward2 + hybridReward2, 3500 * 10**18, 0.01e18);
+    }
+
+    /// @notice 测试getBoostRewardBreakdown - gamma=0时全部是hybrid
+    function testGetBoostRewardBreakdown_GammaZero() public {
+        uint256 sessionId = _createTestSession();
+        staking.setGamma(sessionId, 0); // gamma=0
+
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 5000 * 10**18);
+        staking.deposit(sessionId, 5000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 31 days);
+
+        (uint256 stakeReward, uint256 hybridReward) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        // gamma=0时,stakeReward应该为0,hybridReward应该是全部
+        assertEq(stakeReward, 0);
+        assertApproxEqRel(hybridReward, 5000 * 10**18, 0.01e18);
+    }
+
+    /// @notice 测试getBoostRewardBreakdown - gamma=1时全部是stake
+    function testGetBoostRewardBreakdown_GammaOne() public {
+        uint256 sessionId = _createTestSession();
+        staking.setGamma(sessionId, 1e18); // gamma=1
+
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 5000 * 10**18);
+        staking.deposit(sessionId, 5000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 31 days);
+
+        (uint256 stakeReward, uint256 hybridReward) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        // gamma=1时,stakeReward应该是全部,hybridReward应该为0
+        assertApproxEqRel(stakeReward, 5000 * 10**18, 0.01e18);
+        assertEq(hybridReward, 0);
+    }
+
+    /// @notice 测试getBoostRewardBreakdown - 多用户复杂场景
+    function testGetBoostRewardBreakdown_MultipleUsers() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // user1: stake=2000, boost=1
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 2000 * 10**18);
+        staking.deposit(sessionId, 2000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // user2: stake=3000, boost=2
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 3000 * 10**18);
+        staking.deposit(sessionId, 3000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // user3: stake=5000, boost=3
+        vm.startPrank(user3);
+        lpToken.approve(address(staking), 5000 * 10**18);
+        staking.deposit(sessionId, 5000 * 10**18);
+        staking.checkIn(sessionId);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 31 days);
+
+        (uint256 stake1, uint256 hybrid1) = staking.getBoostRewardBreakdown(sessionId, user1);
+        (uint256 stake2, uint256 hybrid2) = staking.getBoostRewardBreakdown(sessionId, user2);
+        (uint256 stake3, uint256 hybrid3) = staking.getBoostRewardBreakdown(sessionId, user3);
+
+        // 验证stake部分按质押比例分配
+        // totalStaked=10000, stakePart=3000
+        assertApproxEqRel(stake1, 600 * 10**18, 0.01e18);  // 2000/10000 * 3000 = 600
+        assertApproxEqRel(stake2, 900 * 10**18, 0.01e18);  // 3000/10000 * 3000 = 900
+        assertApproxEqRel(stake3, 1500 * 10**18, 0.01e18); // 5000/10000 * 3000 = 1500
+
+        // 验证hybrid部分
+        assertGt(hybrid1, 0);
+        assertGt(hybrid2, 0);
+        assertGt(hybrid3, 0);
+
+        // 验证所有奖励总和等于5000
+        uint256 totalStake = stake1 + stake2 + stake3;
+        uint256 totalHybrid = hybrid1 + hybrid2 + hybrid3;
+        assertApproxEqRel(totalStake + totalHybrid, 5000 * 10**18, 0.01e18);
+
+        // 验证与pendingBoostReward一致
+        assertEq(stake1 + hybrid1, staking.pendingBoostReward(sessionId, user1));
+        assertEq(stake2 + hybrid2, staking.pendingBoostReward(sessionId, user2));
+        assertEq(stake3 + hybrid3, staking.pendingBoostReward(sessionId, user3));
+    }
+
+    /// @notice 测试getBoostRewardBreakdown - 没有质押
+    function testGetBoostRewardBreakdown_NoStake() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // user1没有质押
+        (uint256 stakeReward, uint256 hybridReward) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        assertEq(stakeReward, 0);
+        assertEq(hybridReward, 0);
     }
 
     // ============================================
