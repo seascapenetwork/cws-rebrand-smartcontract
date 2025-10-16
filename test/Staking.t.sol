@@ -253,7 +253,7 @@ contract StakingTest is Test {
         vm.stopPrank();
 
         // 验证
-        (uint256 amount,,,, ) = staking.userInfo(sessionId, user1);
+        (uint256 amount,,,,, ) = staking.userInfo(sessionId, user1);
         assertEq(amount, depositAmount);
     }
 
@@ -298,8 +298,93 @@ contract StakingTest is Test {
 
         vm.stopPrank();
 
-        (uint256 amount,,,, ) = staking.userInfo(sessionId, user1);
+        (uint256 amount,,,,, ) = staking.userInfo(sessionId, user1);
         assertEq(amount, firstDeposit + secondDeposit);
+    }
+
+    /// @notice 测试多次deposit会累积奖励而不是清零
+    function testMultipleDepositsAccumulateRewards() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+
+        // 第一次质押 50个币
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+
+        // 等待10分钟,让奖励累积
+        vm.warp(block.timestamp + 600);
+
+        // 查询第一次的pending奖励
+        uint256 pendingBefore = staking.pendingReward(sessionId, user1);
+        assertGt(pendingBefore, 0, "Should have pending rewards after 10 minutes");
+
+        // 第二次质押 1个币
+        lpToken.approve(address(staking), 1 * 10**18);
+        staking.deposit(sessionId, 1 * 10**18);
+
+        // 查询deposit后的奖励 - 应该保留之前的奖励
+        uint256 pendingAfter = staking.pendingReward(sessionId, user1);
+
+        // deposit后,之前的pending应该被累积到accumulatedReward
+        // pendingAfter应该 >= pendingBefore (可能会稍微小一点因为时间精度)
+        assertApproxEqRel(pendingAfter, pendingBefore, 0.001e18, "Rewards should be accumulated, not reset");
+
+        // 再等待10分钟
+        vm.warp(block.timestamp + 600);
+
+        // 现在的pending应该是: accumulatedReward + 新的pending
+        uint256 pendingFinal = staking.pendingReward(sessionId, user1);
+        assertGt(pendingFinal, pendingAfter, "Rewards should continue to accumulate");
+
+        // 验证用户信息中确实有accumulatedReward
+        Staking.UserInfo memory userInfo = staking.getUserInfo(sessionId, user1);
+        assertGt(userInfo.accumulatedReward, 0, "Should have accumulated rewards stored");
+        assertApproxEqRel(userInfo.accumulatedReward, pendingBefore, 0.001e18, "Accumulated should match first deposit's pending");
+
+        vm.stopPrank();
+    }
+
+    /// @notice 测试三次deposit的累积效果
+    function testThreeDepositsAccumulateCorrectly() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        vm.startPrank(user1);
+
+        // 第一次质押
+        lpToken.approve(address(staking), 100 * 10**18);
+        staking.deposit(sessionId, 30 * 10**18);
+        vm.warp(block.timestamp + 300);
+
+        uint256 pending1 = staking.pendingReward(sessionId, user1);
+
+        // 第二次质押
+        staking.deposit(sessionId, 30 * 10**18);
+        vm.warp(block.timestamp + 300);
+
+        uint256 pending2 = staking.pendingReward(sessionId, user1);
+        assertGt(pending2, pending1, "Second deposit should accumulate more");
+
+        // 第三次质押
+        staking.deposit(sessionId, 40 * 10**18);
+        vm.warp(block.timestamp + 300);
+
+        uint256 pending3 = staking.pendingReward(sessionId, user1);
+        assertGt(pending3, pending2, "Third deposit should accumulate even more");
+
+        // 最终withdraw应该获得所有累积的奖励
+        vm.warp(block.timestamp + 31 days);
+
+        uint256 balanceBefore = rewardToken.balanceOf(user1);
+        staking.withdraw(sessionId);
+        uint256 balanceAfter = rewardToken.balanceOf(user1);
+
+        uint256 receivedReward = balanceAfter - balanceBefore;
+        assertGt(receivedReward, 0, "Should receive accumulated rewards on withdraw");
+
+        vm.stopPrank();
     }
 
     function testDepositDoesNotResetBoost() public {
@@ -320,14 +405,14 @@ contract StakingTest is Test {
         staking.checkIn(sessionId);
 
         // 验证boost = 2
-        (, , uint256 boostBefore, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boostBefore, , ) = staking.userInfo(sessionId, user1);
         assertEq(boostBefore, 2);
 
         // 第二次质押 (复存)
         staking.deposit(sessionId, 1000 * 10**18);
 
         // 验证boost没有被重置
-        (, , uint256 boostAfter, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boostAfter, , ) = staking.userInfo(sessionId, user1);
         assertEq(boostAfter, 2);
 
         vm.stopPrank();
@@ -353,7 +438,7 @@ contract StakingTest is Test {
         vm.stopPrank();
 
         // 验证
-        (, , uint256 boost, uint40 lastCheckInTime, ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boost, uint40 lastCheckInTime, ) = staking.userInfo(sessionId, user1);
         assertEq(boost, 1);
         assertEq(lastCheckInTime, block.timestamp);
     }
@@ -369,25 +454,25 @@ contract StakingTest is Test {
 
         // 第1次签到
         staking.checkIn(sessionId);
-        (, , uint256 boost1, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boost1, , ) = staking.userInfo(sessionId, user1);
         assertEq(boost1, 1);
 
         // 等待5分钟后第2次签到
         vm.warp(startTime + 300);
         staking.checkIn(sessionId);
-        (, , uint256 boost2, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boost2, , ) = staking.userInfo(sessionId, user1);
         assertEq(boost2, 2);
 
         // 等待5分钟后第3次签到
         vm.warp(startTime + 600);
         staking.checkIn(sessionId);
-        (, , uint256 boost3, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boost3, , ) = staking.userInfo(sessionId, user1);
         assertEq(boost3, 3);
 
         // 等待更长时间后第4次签到
         vm.warp(startTime + 1600);
         staking.checkIn(sessionId);
-        (, , uint256 boost4, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boost4, , ) = staking.userInfo(sessionId, user1);
         assertEq(boost4, 4);
 
         vm.stopPrank();
@@ -444,7 +529,7 @@ contract StakingTest is Test {
         vm.warp(firstCheckInTime + 300);
         staking.checkIn(sessionId); // 应该成功
 
-        (, , uint256 boost, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boost, , ) = staking.userInfo(sessionId, user1);
         assertEq(boost, 2);
 
         vm.stopPrank();
@@ -480,8 +565,8 @@ contract StakingTest is Test {
         staking.checkIn(sessionId);
 
         // 验证boost
-        (, , uint256 boost1, , ) = staking.userInfo(sessionId, user1);
-        (, , uint256 boost2, , ) = staking.userInfo(sessionId, user2);
+        (, , , uint256 boost1, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 boost2, , ) = staking.userInfo(sessionId, user2);
         assertEq(boost1, 2);
         assertEq(boost2, 1);
     }
@@ -501,7 +586,7 @@ contract StakingTest is Test {
             vm.warp(startTime + (300 * (i + 1)));
         }
 
-        (, , uint256 finalBoost, , ) = staking.userInfo(sessionId, user1);
+        (, , , uint256 finalBoost, , ) = staking.userInfo(sessionId, user1);
         assertEq(finalBoost, 10);
 
         vm.stopPrank();
@@ -1170,7 +1255,7 @@ contract StakingTest is Test {
         vm.stopPrank();
 
         // 验证session1的boost
-        (, , uint256 boost1, , ) = staking.userInfo(session1, user1);
+        (, , , uint256 boost1, , ) = staking.userInfo(session1, user1);
         assertEq(boost1, 2);
 
         // 等到session1结束
@@ -1204,18 +1289,18 @@ contract StakingTest is Test {
         vm.stopPrank();
 
         // 验证session2的boost从0开始
-        (, , uint256 boost2Before, , ) = staking.userInfo(session2, user1);
+        (, , , uint256 boost2Before, , ) = staking.userInfo(session2, user1);
         assertEq(boost2Before, 0);
 
         // 在session2签到
         vm.prank(user1);
         staking.checkIn(session2);
 
-        (, , uint256 boost2After, , ) = staking.userInfo(session2, user1);
+        (, , , uint256 boost2After, , ) = staking.userInfo(session2, user1);
         assertEq(boost2After, 1);
 
         // session1的boost不受影响
-        (, , uint256 boost1Final, , ) = staking.userInfo(session1, user1);
+        (, , , uint256 boost1Final, , ) = staking.userInfo(session1, user1);
         assertEq(boost1Final, 2);
     }
 
@@ -1826,6 +1911,170 @@ contract StakingTest is Test {
     }
 
     // ============================================
+    // 测试: totalReward守恒性和boostReward逻辑
+    // ============================================
+
+    /// @notice 测试所有用户的LP奖励总和等于totalReward
+    function testTotalRewardConservation() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // 3个用户,不同时间点质押不同次数
+        // user1: 质押2次
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 100 * 10**18);
+        staking.deposit(sessionId, 30 * 10**18);
+        vm.warp(block.timestamp + 1000);
+        staking.deposit(sessionId, 20 * 10**18);
+        vm.stopPrank();
+
+        // user2: 质押1次
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+        vm.stopPrank();
+
+        // user3: 质押3次
+        vm.startPrank(user3);
+        lpToken.approve(address(staking), 100 * 10**18);
+        staking.deposit(sessionId, 10 * 10**18);
+        vm.warp(block.timestamp + 500);
+        staking.deposit(sessionId, 15 * 10**18);
+        vm.warp(block.timestamp + 500);
+        staking.deposit(sessionId, 25 * 10**18);
+        vm.stopPrank();
+
+        // 等到session结束
+        vm.warp(block.timestamp + 31 days);
+
+        // 查询所有用户的LP奖励
+        (uint256 reward1, ) = staking.getPendingRewards(sessionId, user1);
+        (uint256 reward2, ) = staking.getPendingRewards(sessionId, user2);
+        (uint256 reward3, ) = staking.getPendingRewards(sessionId, user3);
+
+        uint256 totalDistributed = reward1 + reward2 + reward3;
+        uint256 totalReward = 10000 * 10**18;
+
+        // 验证守恒性:所有用户的LP奖励总和 = totalReward
+        assertApproxEqRel(totalDistributed, totalReward, 0.001e18, "Total rewards should equal totalReward");
+    }
+
+    /// @notice 测试复存会增加自己的boostReward份额(多用户场景)
+    function testDepositIncreasesBoostReward() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // user2先质押签到,作为竞争者
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // user1质押签到
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 100 * 10**18);
+        staking.deposit(sessionId, 30 * 10**18);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+
+        // 记录第一次的boostReward
+        uint256 boostBefore = staking.pendingBoostReward(sessionId, user1);
+        (uint256 stakeBefore, uint256 hybridBefore) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        // 第二次质押(复存)
+        vm.warp(block.timestamp + 300);
+        staking.deposit(sessionId, 20 * 10**18);
+
+        // 复存后boostReward应该增加(因为质押量增加了)
+        uint256 boostAfter = staking.pendingBoostReward(sessionId, user1);
+        (uint256 stakeAfter, uint256 hybridAfter) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        assertGt(boostAfter, boostBefore, "Boost reward should increase after additional deposit");
+        assertGt(stakeAfter, stakeBefore, "Stake reward should increase (more stake)");
+        assertGt(hybridAfter, hybridBefore, "Hybrid reward should increase (more stake weight)");
+
+        vm.stopPrank();
+    }
+
+    /// @notice 测试签到会增加boostReward的hybridReward部分(多用户场景)
+    function testCheckInIncreasesBoostReward() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // user2先质押签到,作为竞争者
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // user1质押签到
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+
+        // 第一次签到
+        staking.checkIn(sessionId);
+        uint256 boost1 = staking.pendingBoostReward(sessionId, user1);
+        (uint256 stake1, uint256 hybrid1) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        // 第二次签到
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        uint256 boost2 = staking.pendingBoostReward(sessionId, user1);
+        (uint256 stake2, uint256 hybrid2) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        // boostReward应该增加
+        assertGt(boost2, boost1, "Boost reward should increase after second check-in");
+
+        // stakeReward不变(只和质押量有关)
+        assertEq(stake2, stake1, "Stake reward should not change (only depends on amount)");
+
+        // hybridReward增加(和boost有关)
+        assertGt(hybrid2, hybrid1, "Hybrid reward should increase (depends on boost)");
+
+        vm.stopPrank();
+    }
+
+    /// @notice 测试复存+签到的组合效果(多用户场景)
+    function testDepositAndCheckInCombinedEffect() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // user2先质押签到,作为竞争者
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        // user1质押签到
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 100 * 10**18);
+
+        // 初始状态:质押+签到
+        staking.deposit(sessionId, 20 * 10**18);
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        uint256 boostInitial = staking.pendingBoostReward(sessionId, user1);
+
+        // 复存后boost增加
+        vm.warp(block.timestamp + 300);
+        staking.deposit(sessionId, 30 * 10**18);
+        uint256 boostAfterDeposit = staking.pendingBoostReward(sessionId, user1);
+        assertGt(boostAfterDeposit, boostInitial, "Deposit should increase boost");
+
+        // 再签到后boost继续增加
+        vm.warp(block.timestamp + 300);
+        staking.checkIn(sessionId);
+        uint256 boostAfterCheckIn = staking.pendingBoostReward(sessionId, user1);
+        assertGt(boostAfterCheckIn, boostAfterDeposit, "CheckIn should further increase boost");
+
+        vm.stopPrank();
+    }
+
+    // ============================================
     // 测试: getBoostRewardBreakdown函数
     // ============================================
 
@@ -2063,4 +2312,81 @@ contract StakingTest is Test {
     }
 
     receive() external payable {}
+
+    /// @notice 测试第一个签到的人不能获得100%的checkInRewardPool
+    function testFirstCheckInDoesNotGet100Percent() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // user1和user2都质押50%
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+        vm.stopPrank();
+
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+        vm.stopPrank();
+
+        // 只有user1签到
+        vm.prank(user1);
+        staking.checkIn(sessionId);
+
+        // 查询user1的boostReward
+        uint256 boostReward1 = staking.pendingBoostReward(sessionId, user1);
+        uint256 totalPool = 5000 * 10**18;
+
+        // user1不能获得100%
+        assertLt(boostReward1, totalPool, "First check-in should NOT get 100% of pool");
+
+        // 根据公式,user1应该获得3500 (stakeReward=1500 + hybridReward=2000)
+        assertApproxEqRel(boostReward1, 3500 * 10**18, 0.01e18, "Should get 3500 (70%)");
+    }
+
+    /// @notice 测试第二个人签到后,第一个人的boostReward会减少
+    function testSecondCheckInReducesFirstUserReward() public {
+        uint256 sessionId = _createTestSession();
+        vm.warp(block.timestamp + 1 days + 1);
+
+        // 两个用户都先质押(但只有user1签到)
+        vm.startPrank(user1);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+        staking.checkIn(sessionId);
+        vm.stopPrank();
+
+        vm.startPrank(user2);
+        lpToken.approve(address(staking), 50 * 10**18);
+        staking.deposit(sessionId, 50 * 10**18);
+        vm.stopPrank();
+
+        // 记录user1第一次的boostReward (此时只有user1签到)
+        uint256 boostBefore = staking.pendingBoostReward(sessionId, user1);
+        (uint256 stakeBefore, uint256 hybridBefore) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        // user2签到
+        vm.warp(block.timestamp + 300);
+        vm.prank(user2);
+        staking.checkIn(sessionId);
+
+        // 查询user1的新boostReward
+        uint256 boostAfter = staking.pendingBoostReward(sessionId, user1);
+        (uint256 stakeAfter, uint256 hybridAfter) = staking.getBoostRewardBreakdown(sessionId, user1);
+
+        // user1的boostReward应该减少
+        assertLt(boostAfter, boostBefore, "User1 boost reward should DECREASE after user2 checks in");
+
+        // stakeReward不变(两人都已质押,totalStaked不变)
+        assertEq(stakeAfter, stakeBefore, "Stake reward should not change");
+
+        // hybridReward减少(因为要和user2分享)
+        assertLt(hybridAfter, hybridBefore, "Hybrid reward should decrease (now shared with user2)");
+
+        // 具体数值验证:
+        // Before: stake=1500, hybrid=2000, total=3500
+        // After:  stake=1500, hybrid=1000, total=2500
+        assertApproxEqRel(boostBefore, 3500 * 10**18, 0.01e18, "Before: should be 3500");
+        assertApproxEqRel(boostAfter, 2500 * 10**18, 0.01e18, "After: should be 2500");
+    }
 }

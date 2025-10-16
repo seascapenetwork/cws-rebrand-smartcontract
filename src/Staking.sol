@@ -61,6 +61,7 @@ contract Staking is Ownable, ReentrancyGuard {
     struct UserInfo {
         uint256 amount;                 // 用户质押数量
         uint256 rewardDebt;             // 奖励债务(用于计算待领取奖励)
+        uint256 accumulatedReward;      // 累积的待领取奖励(deposit时自动收获但不发送)
         uint256 boost;                  // 用户boost点数(每次签到+1，无上限)
         uint40 lastCheckInTime;         // 最后一次签到时间戳(用于5分钟冷却检查)
         bool hasWithdrawn;              // 是否已提取(防止重复提取)
@@ -303,7 +304,7 @@ contract Staking is Ownable, ReentrancyGuard {
     /// @notice 查询用户待领取的LP质押奖励
     /// @param _sessionId Session ID
     /// @param _user 用户地址
-    /// @return 待领取的LP质押奖励数量
+    /// @return 待领取的LP质押奖励数量(包含已累积的和当前pending的)
     function pendingReward(uint256 _sessionId, address _user)
         external
         view
@@ -313,19 +314,23 @@ contract Staking is Ownable, ReentrancyGuard {
         Session storage session = sessions[_sessionId];
         UserInfo storage user = userInfo[_sessionId][_user];
 
-        if (user.amount == 0) {
-            return 0;
+        // 已累积的奖励
+        uint256 accumulated = user.accumulatedReward;
+
+        // 当前pending奖励
+        if (user.amount > 0) {
+            uint256 accRewardPerShare = session.accRewardPerShare;
+
+            if (block.timestamp > session.lastRewardTime && session.totalStaked > 0) {
+                uint256 timeElapsed = _getElapsedTime(_sessionId, session.lastRewardTime);
+                uint256 reward = timeElapsed * session.rewardPerSecond;
+                accRewardPerShare += (reward * SCALER) / session.totalStaked;
+            }
+
+            accumulated += (user.amount * accRewardPerShare / SCALER) - user.rewardDebt;
         }
 
-        uint256 accRewardPerShare = session.accRewardPerShare;
-
-        if (block.timestamp > session.lastRewardTime && session.totalStaked > 0) {
-            uint256 timeElapsed = _getElapsedTime(_sessionId, session.lastRewardTime);
-            uint256 reward = timeElapsed * session.rewardPerSecond;
-            accRewardPerShare += (reward * SCALER) / session.totalStaked;
-        }
-
-        return (user.amount * accRewardPerShare / SCALER) - user.rewardDebt;
+        return accumulated;
     }
 
     /// @notice 查询用户的boost奖励(使用新的分池权重法)
@@ -394,7 +399,7 @@ contract Staking is Ownable, ReentrancyGuard {
     /// @notice 查询用户的所有待领取奖励(质押奖励 + boost奖励)
     /// @param _sessionId Session ID
     /// @param _user 用户地址
-    /// @return stakingReward 质押奖励数量
+    /// @return stakingReward 质押奖励数量(包含已累积的和当前pending的)
     /// @return boostReward boost奖励数量
     function getPendingRewards(uint256 _sessionId, address _user)
         external
@@ -405,7 +410,9 @@ contract Staking is Ownable, ReentrancyGuard {
         Session storage session = sessions[_sessionId];
         UserInfo storage user = userInfo[_sessionId][_user];
 
-        // 计算质押奖励
+        // 计算质押奖励 = 已累积的 + 当前pending
+        stakingReward = user.accumulatedReward;
+
         if (user.amount > 0) {
             uint256 accRewardPerShare = session.accRewardPerShare;
 
@@ -415,7 +422,7 @@ contract Staking is Ownable, ReentrancyGuard {
                 accRewardPerShare += (reward * SCALER) / session.totalStaked;
             }
 
-            stakingReward = (user.amount * accRewardPerShare / SCALER) - user.rewardDebt;
+            stakingReward += (user.amount * accRewardPerShare / SCALER) - user.rewardDebt;
         }
 
         // 计算boost奖励
@@ -487,8 +494,9 @@ contract Staking is Ownable, ReentrancyGuard {
     function _processWithdrawal(uint256 _sessionId, UserInfo storage user) internal {
         Session storage session = sessions[_sessionId];
 
-        // 计算LP质押奖励
-        uint256 lpReward = (user.amount * session.accRewardPerShare / SCALER) - user.rewardDebt;
+        // 计算LP质押奖励 = 已累积的 + 当前pending
+        uint256 lpReward = user.accumulatedReward +
+                          ((user.amount * session.accRewardPerShare / SCALER) - user.rewardDebt);
 
         // 计算签到奖励
         uint256 checkInReward = _calculateCheckInReward(_sessionId, user);
@@ -602,6 +610,14 @@ contract Staking is Ownable, ReentrancyGuard {
 
         // 转入质押代币 (仅支持ERC20)
         IERC20(session.stakingToken).safeTransferFrom(msg.sender, address(this), _amount);
+
+        // 如果用户已有质押,先收获pending奖励到accumulatedReward
+        if (user.amount > 0) {
+            uint256 pending = (user.amount * session.accRewardPerShare / SCALER) - user.rewardDebt;
+            if (pending > 0) {
+                user.accumulatedReward += pending;
+            }
+        }
 
         // 如果用户已有boost,需要更新totalWeightedStake
         if (user.boost > 0) {
