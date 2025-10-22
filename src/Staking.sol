@@ -377,20 +377,18 @@ contract Staking is Ownable, ReentrancyGuard {
         // 2) 计算hybrid部分: (1-γ) × totalBoostPool × (userStake × userBoost) / Σ(allStake × allBoost)
         uint256 hybridPart = totalBoostPool - stakePart;
 
-        if (session.totalBoostPoints == 0) {
-            // 边界处理: 如果没人签到,hybrid部分也按stake分
-            hybridReward = (hybridPart * stakeShare1e18) / SCALER;
-        } else {
-            uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
-            uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
-            uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
+        // 注意: 由于上面已经检查了 user.boost > 0，所以这里 totalBoostPoints 必然 > 0
+        // 因为至少当前用户有 boost。不需要检查 totalBoostPoints == 0 的情况。
 
-            if (sumSB1e18 > 0) {
-                hybridReward = (hybridPart * sb1e18) / sumSB1e18;
-            } else {
-                // fallback: 按stake分
-                hybridReward = (hybridPart * stakeShare1e18) / SCALER;
-            }
+        uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
+        uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
+        uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
+
+        if (sumSB1e18 > 0) {
+            hybridReward = (hybridPart * sb1e18) / sumSB1e18;
+        } else {
+            // fallback: 按stake分 (理论上不应该到达这里，因为至少当前用户有 weightedStake)
+            hybridReward = (hybridPart * stakeShare1e18) / SCALER;
         }
 
         return (stakeReward, hybridReward);
@@ -545,32 +543,30 @@ contract Staking is Ownable, ReentrancyGuard {
         uint256 hybridPart = totalBoostPool - stakePart;
         uint256 rewardFromHybrid = 0;
 
-        // 边界处理: 如果没人签到(totalBoostPoints==0),则把hybrid部分也按stake分
-        if (session.totalBoostPoints == 0) {
-            rewardFromHybrid = (hybridPart * stakeShare1e18) / SCALER;
+        // 注意: 由于上面已经检查了 user.boost > 0，所以这里 totalBoostPoints 必然 > 0
+        // 因为至少当前用户有 boost。不需要检查 totalBoostPoints == 0 的情况。
+
+        // 计算用户的 s_i * b_i
+        // s_i = user.amount / totalStaked (scaled by 1e18)
+        // b_i = user.boost / totalBoostPoints (scaled by 1e18)
+        // s_i * b_i = (s_i * b_i) / 1e18
+        uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
+        uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
+
+        // Σ(s*b) 的计算:
+        // 注意 Σ(s_i * b_i) = Σ((stake_i/totalStaked) * (boost_i/totalBoost))
+        //                    = (1/(totalStaked * totalBoost)) * Σ(stake_i * boost_i)
+        //                    = totalWeightedStake / (totalStaked * totalBoost)
+        // 因为 sb_i 已经是 1e18 scaled, sumSB 也应该是 1e18 scaled
+        // sumSB1e18 = (totalWeightedStake / totalStaked) * (SCALER / totalBoostPoints)
+        //           = (totalWeightedStake * SCALER) / (totalStaked * totalBoostPoints)
+        uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
+
+        if (sumSB1e18 > 0) {
+            rewardFromHybrid = (hybridPart * sb1e18) / sumSB1e18;
         } else {
-            // 计算用户的 s_i * b_i
-            // s_i = user.amount / totalStaked (scaled by 1e18)
-            // b_i = user.boost / totalBoostPoints (scaled by 1e18)
-            // s_i * b_i = (s_i * b_i) / 1e18
-            uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
-            uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
-
-            // Σ(s*b) 的计算:
-            // 注意 Σ(s_i * b_i) = Σ((stake_i/totalStaked) * (boost_i/totalBoost))
-            //                    = (1/(totalStaked * totalBoost)) * Σ(stake_i * boost_i)
-            //                    = totalWeightedStake / (totalStaked * totalBoost)
-            // 因为 sb_i 已经是 1e18 scaled, sumSB 也应该是 1e18 scaled
-            // sumSB1e18 = (totalWeightedStake / totalStaked) * (SCALER / totalBoostPoints)
-            //           = (totalWeightedStake * SCALER) / (totalStaked * totalBoostPoints)
-            uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
-
-            if (sumSB1e18 > 0) {
-                rewardFromHybrid = (hybridPart * sb1e18) / sumSB1e18;
-            } else {
-                // fallback: 按stake分
-                rewardFromHybrid = (hybridPart * stakeShare1e18) / SCALER;
-            }
+            // fallback: 按stake分 (理论上不应该到达这里，因为至少当前用户有 weightedStake)
+            rewardFromHybrid = (hybridPart * stakeShare1e18) / SCALER;
         }
 
         return rewardFromStake + rewardFromHybrid;
@@ -629,6 +625,8 @@ contract Staking is Ownable, ReentrancyGuard {
 
         // 更新用户状态
         user.amount += _amount;
+        // 重新计算 rewardDebt: 这是标准的 MasterChef 模式
+        // 在上面已经收获了 pending 奖励到 accumulatedReward,所以这里重新设置 rewardDebt 是正确的
         user.rewardDebt = user.amount * session.accRewardPerShare / SCALER;
 
         // 更新session总质押量
