@@ -105,7 +105,7 @@ contract StakingRewardDebtFixTest is Test {
         vm.stopPrank();
 
         // 检查 Alice 的状态
-        (uint256 aliceAmount1, uint256 aliceRewardDebt1,,,,) = staking.userInfo(sessionId, alice);
+        (uint256 aliceAmount1, uint256 aliceRewardDebt1,,,,,,) = staking.userInfo(sessionId, alice);
         console.log("After first deposit:");
         console.log("  Alice amount:", aliceAmount1 / 10 ** 18);
         console.log("  Alice rewardDebt:", aliceRewardDebt1 / 10 ** 18);
@@ -120,7 +120,7 @@ contract StakingRewardDebtFixTest is Test {
         vm.stopPrank();
 
         // 检查 Alice 的状态
-        (uint256 aliceAmount2, uint256 aliceRewardDebt2, uint256 aliceAccumulated2,,,) =
+        (uint256 aliceAmount2, uint256 aliceRewardDebt2, uint256 aliceAccumulated2,,,,,) =
             staking.userInfo(sessionId, alice);
         console.log("\nAfter second deposit:");
         console.log("  Alice amount:", aliceAmount2 / 10 ** 18);

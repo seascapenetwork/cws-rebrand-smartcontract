@@ -185,7 +185,7 @@ contract StakingFlashLoanAttackTest is Test {
         console.log("Alice staked: 100 tokens, checked in 10 times");
 
         // 查询 Alice 的 boost
-        (, , , uint256 aliceBoost, , ) = staking.userInfo(sessionId, alice);
+        (, , , uint256 aliceBoost, , , , ) = staking.userInfo(sessionId, alice);
         console.log("Alice boost:", aliceBoost);
 
         // 时间流逝到接近结束（95天，确保在session期间）

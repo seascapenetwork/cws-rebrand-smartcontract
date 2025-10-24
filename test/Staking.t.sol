@@ -91,8 +91,9 @@ contract StakingTest is Test {
             uint256 _totalReward,
             uint256 _checkInRewardPool,
             uint256 _startTime,
-            uint256 _endTime,,,,,,,
+            uint256 _endTime,,,,,,,,
             uint256 gamma,
+
         ) = staking.sessions(1);
 
         assertEq(stakingToken, address(lpToken));
@@ -113,7 +114,7 @@ contract StakingTest is Test {
         staking.setGamma(sessionId, newGamma);
 
         // 验证
-        (,,,,,,,,,,,,, uint256 gamma,) = staking.sessions(sessionId);
+        (,,,,,,,,,,,,,, uint256 gamma, bool active, uint256 totalTimeWeightedStake) = staking.sessions(sessionId);
         assertEq(gamma, newGamma);
     }
 
@@ -141,14 +142,14 @@ contract StakingTest is Test {
 
         // 测试gamma = 0 (全部分配给hybrid部分)
         staking.setGamma(sessionId, 0);
-        (,,,,,,,,,,,,, uint256 gamma1,) = staking.sessions(sessionId);
+        (,,,,,,,,,,,,,, uint256 gamma1, bool _, uint256 _) = staking.sessions(sessionId);
         assertEq(gamma1, 0);
 
         // 创建新session测试gamma = 1e18 (全部分配给stake部分)
         vm.warp(block.timestamp + 32 days);
         uint256 sessionId2 = _createTestSession();
         staking.setGamma(sessionId2, 1e18);
-        (,,,,,,,,,,,,, uint256 gamma2,) = staking.sessions(sessionId2);
+        (,,,,,,,,,,,,,, uint256 gamma2, bool _, uint256 _) = staking.sessions(sessionId2);
         assertEq(gamma2, 1e18);
     }
 
@@ -253,7 +254,7 @@ contract StakingTest is Test {
         vm.stopPrank();
 
         // 验证
-        (uint256 amount,,,,,) = staking.userInfo(sessionId, user1);
+        (uint256 amount,,,,,,,) = staking.userInfo(sessionId, user1);
         assertEq(amount, depositAmount);
     }
 
@@ -298,7 +299,7 @@ contract StakingTest is Test {
 
         vm.stopPrank();
 
-        (uint256 amount,,,,,) = staking.userInfo(sessionId, user1);
+        (uint256 amount,,,,,,,) = staking.userInfo(sessionId, user1);
         assertEq(amount, firstDeposit + secondDeposit);
     }
 
@@ -407,14 +408,14 @@ contract StakingTest is Test {
         staking.checkIn(sessionId);
 
         // 验证boost = 2
-        (,,, uint256 boostBefore,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boostBefore,,,,) = staking.userInfo(sessionId, user1);
         assertEq(boostBefore, 2);
 
         // 第二次质押 (复存)
         staking.deposit(sessionId, 1000 * 10 ** 18);
 
         // 验证boost没有被重置
-        (,,, uint256 boostAfter,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boostAfter,,,,) = staking.userInfo(sessionId, user1);
         assertEq(boostAfter, 2);
 
         vm.stopPrank();
@@ -440,7 +441,7 @@ contract StakingTest is Test {
         vm.stopPrank();
 
         // 验证
-        (,,, uint256 boost, uint40 lastCheckInTime,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boost, uint40 lastCheckInTime,,,) = staking.userInfo(sessionId, user1);
         assertEq(boost, 1);
         assertEq(lastCheckInTime, block.timestamp);
     }
@@ -456,25 +457,25 @@ contract StakingTest is Test {
 
         // 第1次签到
         staking.checkIn(sessionId);
-        (,,, uint256 boost1,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boost1,,,,) = staking.userInfo(sessionId, user1);
         assertEq(boost1, 1);
 
         // 等待5分钟后第2次签到
         vm.warp(startTime + 300);
         staking.checkIn(sessionId);
-        (,,, uint256 boost2,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boost2,,,,) = staking.userInfo(sessionId, user1);
         assertEq(boost2, 2);
 
         // 等待5分钟后第3次签到
         vm.warp(startTime + 600);
         staking.checkIn(sessionId);
-        (,,, uint256 boost3,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boost3,,,,) = staking.userInfo(sessionId, user1);
         assertEq(boost3, 3);
 
         // 等待更长时间后第4次签到
         vm.warp(startTime + 1600);
         staking.checkIn(sessionId);
-        (,,, uint256 boost4,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boost4,,,,) = staking.userInfo(sessionId, user1);
         assertEq(boost4, 4);
 
         vm.stopPrank();
@@ -531,7 +532,7 @@ contract StakingTest is Test {
         vm.warp(firstCheckInTime + 300);
         staking.checkIn(sessionId); // 应该成功
 
-        (,,, uint256 boost,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boost,,,,) = staking.userInfo(sessionId, user1);
         assertEq(boost, 2);
 
         vm.stopPrank();
@@ -567,8 +568,8 @@ contract StakingTest is Test {
         staking.checkIn(sessionId);
 
         // 验证boost
-        (,,, uint256 boost1,,) = staking.userInfo(sessionId, user1);
-        (,,, uint256 boost2,,) = staking.userInfo(sessionId, user2);
+        (,,, uint256 boost1,,,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 boost2,,,,) = staking.userInfo(sessionId, user2);
         assertEq(boost1, 2);
         assertEq(boost2, 1);
     }
@@ -588,7 +589,7 @@ contract StakingTest is Test {
             vm.warp(startTime + (300 * (i + 1)));
         }
 
-        (,,, uint256 finalBoost,,) = staking.userInfo(sessionId, user1);
+        (,,, uint256 finalBoost,,,,) = staking.userInfo(sessionId, user1);
         assertEq(finalBoost, 10);
 
         vm.stopPrank();
@@ -1257,7 +1258,7 @@ contract StakingTest is Test {
         vm.stopPrank();
 
         // 验证session1的boost
-        (,,, uint256 boost1,,) = staking.userInfo(session1, user1);
+        (,,, uint256 boost1,,,,) = staking.userInfo(session1, user1);
         assertEq(boost1, 2);
 
         // 等到session1结束
@@ -1291,18 +1292,18 @@ contract StakingTest is Test {
         vm.stopPrank();
 
         // 验证session2的boost从0开始
-        (,,, uint256 boost2Before,,) = staking.userInfo(session2, user1);
+        (,,, uint256 boost2Before,,,,) = staking.userInfo(session2, user1);
         assertEq(boost2Before, 0);
 
         // 在session2签到
         vm.prank(user1);
         staking.checkIn(session2);
 
-        (,,, uint256 boost2After,,) = staking.userInfo(session2, user1);
+        (,,, uint256 boost2After,,,,) = staking.userInfo(session2, user1);
         assertEq(boost2After, 1);
 
         // session1的boost不受影响
-        (,,, uint256 boost1Final,,) = staking.userInfo(session1, user1);
+        (,,, uint256 boost1Final,,,,) = staking.userInfo(session1, user1);
         assertEq(boost1Final, 2);
     }
 
@@ -1314,7 +1315,7 @@ contract StakingTest is Test {
         uint256 sessionId = _createTestSession();
 
         // 获取session信息
-        (,,,,,, uint256 endTime,,,,,,,,) = staking.sessions(sessionId);
+        (,,,,,, uint256 endTime,,,,,,,, bool _, uint256 _) = staking.sessions(sessionId);
 
         // 在session开始时质押
         vm.warp(block.timestamp + 1 days + 1);

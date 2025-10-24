@@ -54,6 +54,7 @@ contract Staking is Ownable, ReentrancyGuard {
         uint256 totalBoostPoints;       // 全局boost点数总和 Σ(boost)
         uint256 gamma;                  // boost奖励分配参数(scaled by SCALER) 默认0.6e18
         bool active;                    // session是否激活(防止重复使用)
+        uint256 totalTimeWeightedStake; // 全局时间加权质押量 Σ(用户质押 × 持有时长) 用于防止闪电贷
     }
 
     /// @notice 用户信息结构体
@@ -65,6 +66,8 @@ contract Staking is Ownable, ReentrancyGuard {
         uint256 boost;                  // 用户boost点数(每次签到+1，无上限)
         uint40 lastCheckInTime;         // 最后一次签到时间戳(用于5分钟冷却检查)
         bool hasWithdrawn;              // 是否已提取(防止重复提取)
+        uint256 timeWeightedStake;      // 时间加权质押量 = Σ(质押量 × 持有时长) 用于防止闪电贷攻击
+        uint40 lastUpdateTime;          // 上次更新时间加权质押量的时间戳
     }
 
     // ============================================
@@ -262,6 +265,15 @@ contract Staking is Ownable, ReentrancyGuard {
         require(user.amount > 0, "Must stake before check-in");
         require(block.timestamp >= user.lastCheckInTime + 300, "Check-in cooldown not expired");
 
+        // 更新时间加权质押量: 累加从上次更新到现在的时间加权
+        uint256 currentTime = block.timestamp;
+        uint256 timeSinceLastUpdate = currentTime - user.lastUpdateTime;
+        uint256 additionalTimeWeightedStake = user.amount * timeSinceLastUpdate;
+
+        user.timeWeightedStake += additionalTimeWeightedStake;
+        session.totalTimeWeightedStake += additionalTimeWeightedStake;
+        user.lastUpdateTime = uint40(currentTime);
+
         // 更新全局加权质押量: 从 (amount * oldBoost) 变为 (amount * newBoost)
         uint256 oldWeightedStake = user.amount * user.boost;
         user.boost += 1;
@@ -350,8 +362,8 @@ contract Staking is Ownable, ReentrancyGuard {
     /// @notice 查询用户的boost奖励分解(stake部分和hybrid部分)
     /// @param _sessionId Session ID
     /// @param _user 用户地址
-    /// @return stakeReward stake部分的奖励: γ × totalBoostPool × (userStake / totalStake)
-    /// @return hybridReward hybrid部分的奖励: (1-γ) × totalBoostPool × (userStake × userBoost) / Σ(allStake × allBoost)
+    /// @return stakeReward stake部分的奖励: γ × totalBoostPool × (userTimeWeightedStake / totalTimeWeightedStake)
+    /// @return hybridReward hybrid部分的奖励: (1-γ) × totalBoostPool × (userTimeWeightedStake × userBoost) / Σ(allTimeWeightedStake × allBoost)
     function getBoostRewardBreakdown(uint256 _sessionId, address _user)
         external
         view
@@ -362,33 +374,34 @@ contract Staking is Ownable, ReentrancyGuard {
         UserInfo storage user = userInfo[_sessionId][_user];
 
         // 基础检查
-        if (user.amount == 0 || session.totalStaked == 0 || user.boost == 0) {
+        if (user.amount == 0 || session.totalStaked == 0 || user.boost == 0 || session.totalTimeWeightedStake == 0) {
             return (0, 0);
         }
 
         uint256 totalBoostPool = session.checkInRewardPool;
         uint256 gamma = session.gamma;
 
-        // 1) 计算stake部分: γ × totalBoostPool × (userStake / totalStake)
+        // 1) 计算stake部分: γ × totalBoostPool × (userTimeWeightedStake / totalTimeWeightedStake)
+        // 使用时间加权质押量防止闪电贷攻击
         uint256 stakePart = (totalBoostPool * gamma) / SCALER;
-        uint256 stakeShare1e18 = (user.amount * SCALER) / session.totalStaked;
-        stakeReward = (stakePart * stakeShare1e18) / SCALER;
+        uint256 timeWeightedStakeShare1e18 = (user.timeWeightedStake * SCALER) / session.totalTimeWeightedStake;
+        stakeReward = (stakePart * timeWeightedStakeShare1e18) / SCALER;
 
-        // 2) 计算hybrid部分: (1-γ) × totalBoostPool × (userStake × userBoost) / Σ(allStake × allBoost)
+        // 2) 计算hybrid部分: (1-γ) × totalBoostPool × (userTimeWeightedStake × userBoost) / Σ(allTimeWeightedStake × allBoost)
         uint256 hybridPart = totalBoostPool - stakePart;
 
         // 注意: 由于上面已经检查了 user.boost > 0，所以这里 totalBoostPoints 必然 > 0
         // 因为至少当前用户有 boost。不需要检查 totalBoostPoints == 0 的情况。
 
         uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
-        uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
-        uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
+        uint256 sb1e18 = (timeWeightedStakeShare1e18 * b1e18) / SCALER;
+        uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalTimeWeightedStake * session.totalBoostPoints);
 
         if (sumSB1e18 > 0) {
             hybridReward = (hybridPart * sb1e18) / sumSB1e18;
         } else {
-            // fallback: 按stake分 (理论上不应该到达这里，因为至少当前用户有 weightedStake)
-            hybridReward = (hybridPart * stakeShare1e18) / SCALER;
+            // fallback: 按时间加权质押分 (理论上不应该到达这里，因为至少当前用户有 timeWeightedStake)
+            hybridReward = (hybridPart * timeWeightedStakeShare1e18) / SCALER;
         }
 
         return (stakeReward, hybridReward);
@@ -476,7 +489,8 @@ contract Staking is Ownable, ReentrancyGuard {
             totalWeightedStake: 0,
             totalBoostPoints: 0,
             gamma: 6e17, // 默认0.6 = 0.6 * 1e18
-            active: true
+            active: true,
+            totalTimeWeightedStake: 0
         });
 
         // 记录时间范围
@@ -491,6 +505,14 @@ contract Staking is Ownable, ReentrancyGuard {
     /// @param user 用户信息引用
     function _processWithdrawal(uint256 _sessionId, UserInfo storage user) internal {
         Session storage session = sessions[_sessionId];
+
+        // 更新时间加权质押量: 累加从上次更新到session结束的时间加权
+        uint256 endTime = session.endTime;
+        uint256 timeSinceLastUpdate = endTime > user.lastUpdateTime ? endTime - user.lastUpdateTime : 0;
+        uint256 additionalTimeWeightedStake = user.amount * timeSinceLastUpdate;
+
+        user.timeWeightedStake += additionalTimeWeightedStake;
+        session.totalTimeWeightedStake += additionalTimeWeightedStake;
 
         // 计算LP质押奖励 = 已累积的 + 当前pending
         uint256 lpReward = user.accumulatedReward +
@@ -514,7 +536,7 @@ contract Staking is Ownable, ReentrancyGuard {
         emit Withdrawn(_sessionId, msg.sender, stakedAmount, lpReward, checkInReward, block.timestamp);
     }
 
-    /// @notice 计算boost奖励(使用分池权重法)
+    /// @notice 计算boost奖励(使用分池权重法 + 时间加权质押量防闪电贷)
     /// @param _sessionId Session ID
     /// @param user 用户信息
     /// @return boost奖励数量
@@ -531,42 +553,48 @@ contract Staking is Ownable, ReentrancyGuard {
             return 0;
         }
 
+        // 如果全局时间加权质押量为0，返回0
+        if (session.totalTimeWeightedStake == 0) {
+            return 0;
+        }
+
         uint256 totalBoostPool = session.checkInRewardPool;
         uint256 gamma = session.gamma;
 
-        // 1) 计算stake部分: γ * totalBoostPool * (userStaked / totalStaked)
+        // 1) 计算stake部分: γ * totalBoostPool * (userTimeWeightedStake / totalTimeWeightedStake)
+        // 使用时间加权质押量而不是当前质押量，防止闪电贷攻击
         uint256 stakePart = (totalBoostPool * gamma) / SCALER;
-        uint256 stakeShare1e18 = (user.amount * SCALER) / session.totalStaked;
-        uint256 rewardFromStake = (stakePart * stakeShare1e18) / SCALER;
+        uint256 timeWeightedStakeShare1e18 = (user.timeWeightedStake * SCALER) / session.totalTimeWeightedStake;
+        uint256 rewardFromStake = (stakePart * timeWeightedStakeShare1e18) / SCALER;
 
         // 2) 计算hybrid部分: (1-γ) * totalBoostPool * (s_i*b_i) / Σ(s*b)
+        // 其中 s_i 使用时间加权质押量
         uint256 hybridPart = totalBoostPool - stakePart;
         uint256 rewardFromHybrid = 0;
 
         // 注意: 由于上面已经检查了 user.boost > 0，所以这里 totalBoostPoints 必然 > 0
         // 因为至少当前用户有 boost。不需要检查 totalBoostPoints == 0 的情况。
 
-        // 计算用户的 s_i * b_i
-        // s_i = user.amount / totalStaked (scaled by 1e18)
+        // 计算用户的 s_i * b_i (使用时间加权质押量)
+        // s_i = user.timeWeightedStake / totalTimeWeightedStake (scaled by 1e18)
         // b_i = user.boost / totalBoostPoints (scaled by 1e18)
         // s_i * b_i = (s_i * b_i) / 1e18
         uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
-        uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
+        uint256 sb1e18 = (timeWeightedStakeShare1e18 * b1e18) / SCALER;
 
-        // Σ(s*b) 的计算:
-        // 注意 Σ(s_i * b_i) = Σ((stake_i/totalStaked) * (boost_i/totalBoost))
-        //                    = (1/(totalStaked * totalBoost)) * Σ(stake_i * boost_i)
-        //                    = totalWeightedStake / (totalStaked * totalBoost)
+        // Σ(s*b) 的计算 (使用时间加权质押量):
+        // 注意 Σ(s_i * b_i) = Σ((timeWeightedStake_i/totalTimeWeightedStake) * (boost_i/totalBoost))
+        //                    = (1/(totalTimeWeightedStake * totalBoost)) * Σ(timeWeightedStake_i * boost_i)
         // 因为 sb_i 已经是 1e18 scaled, sumSB 也应该是 1e18 scaled
-        // sumSB1e18 = (totalWeightedStake / totalStaked) * (SCALER / totalBoostPoints)
-        //           = (totalWeightedStake * SCALER) / (totalStaked * totalBoostPoints)
-        uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
+        // sumSB1e18 = (totalWeightedStake * SCALER) / (totalTimeWeightedStake * totalBoostPoints)
+        // 其中 totalWeightedStake = Σ(stake_i * boost_i)
+        uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalTimeWeightedStake * session.totalBoostPoints);
 
         if (sumSB1e18 > 0) {
             rewardFromHybrid = (hybridPart * sb1e18) / sumSB1e18;
         } else {
-            // fallback: 按stake分 (理论上不应该到达这里，因为至少当前用户有 weightedStake)
-            rewardFromHybrid = (hybridPart * stakeShare1e18) / SCALER;
+            // fallback: 按时间加权质押分 (理论上不应该到达这里，因为至少当前用户有 timeWeightedStake)
+            rewardFromHybrid = (hybridPart * timeWeightedStakeShare1e18) / SCALER;
         }
 
         return rewardFromStake + rewardFromHybrid;
@@ -614,6 +642,15 @@ contract Staking is Ownable, ReentrancyGuard {
                 user.accumulatedReward += pending;
             }
         }
+
+        // 更新时间加权质押量: 累加 (新增质押量 × 从现在到session结束的时长)
+        uint256 currentTime = block.timestamp > session.endTime ? session.endTime : block.timestamp;
+        uint256 timeRemaining = session.endTime > currentTime ? session.endTime - currentTime : 0;
+        uint256 additionalTimeWeightedStake = _amount * timeRemaining;
+
+        user.timeWeightedStake += additionalTimeWeightedStake;
+        session.totalTimeWeightedStake += additionalTimeWeightedStake;
+        user.lastUpdateTime = uint40(currentTime);
 
         // 如果用户已有boost,需要更新totalWeightedStake
         if (user.boost > 0) {
