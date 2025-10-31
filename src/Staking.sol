@@ -672,19 +672,20 @@ contract Staking is Ownable, ReentrancyGuard {
         return currentTime - _lastTime;
     }
 
+
     /// @notice 检查新session时间是否与历史重叠
     /// @param _startTime 新session开始时间
     /// @param _endTime 新session结束时间
     function _checkTimeOverlap(uint256 _startTime, uint256 _endTime) internal view {
-        for (uint256 i = 0; i < sessionTimeRanges.length; i++) {
-            TimeRange memory range = sessionTimeRanges[i];
+        // 获取最后一个session的时间范围
+        TimeRange memory lastRange = sessionTimeRanges.length > 0 ? sessionTimeRanges[sessionTimeRanges.length - 1] : TimeRange(0, 0);
 
-            // 检查是否重叠: 新区间的开始时间在旧区间内，或新区间的结束时间在旧区间内，或新区间完全包含旧区间
-            bool overlap = (_startTime < range.endTime && _endTime > range.startTime);
+        // 检查是否重叠: 新session的开始时间或结束时间与最后一个session的时间重叠
+        bool overlap = (_startTime < lastRange.endTime && _endTime > lastRange.startTime);
 
-            require(!overlap, "Session time overlaps with existing session");
-        }
+        require(!overlap, "Session time overlaps with existing session");
     }
+
 
     /// @notice 安全转账函数(仅支持ERC20)
     /// @param _token 代币地址
