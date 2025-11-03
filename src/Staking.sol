@@ -50,9 +50,7 @@ contract Staking is Ownable, ReentrancyGuard {
         uint256 rewardPerSecond;        // 每秒释放的奖励 = totalReward / duration
         uint256 accRewardPerShare;      // 累积的每份额奖励(scaled by SCALER)
         uint256 lastRewardTime;         // 上次更新奖励的时间
-        uint256 totalWeightedStake;     // 全局加权质押量 Σ(用户质押 × boost点数) [保留用于兼容]
-        uint256 totalBoostPoints;       // 全局boost点数总和 Σ(boost)
-        uint256 gamma;                  // boost奖励分配参数(scaled by SCALER) 默认0.6e18
+        uint256 totalBoostPoints;       // 全局boost点数总和 Σ(所有用户的签到点数)
         bool active;                    // session是否激活(防止重复使用)
     }
 
@@ -62,7 +60,7 @@ contract Staking is Ownable, ReentrancyGuard {
         uint256 amount;                 // 用户质押数量
         uint256 rewardDebt;             // 奖励债务(用于计算待领取奖励)
         uint256 accumulatedReward;      // 累积的待领取奖励(deposit时自动收获但不发送)
-        uint256 boost;                  // 用户boost点数(每次签到+1，无上限)
+        uint256 boost;                  // 用户累计签到点数(根据签到时的质押档位累加)
         uint40 lastCheckInTime;         // 最后一次签到时间戳(用于5分钟冷却检查)
         bool hasWithdrawn;              // 是否已提取(防止重复提取)
     }
@@ -210,20 +208,26 @@ contract Staking is Ownable, ReentrancyGuard {
         );
     }
 
-    /// @notice 设置指定session的gamma参数(boost奖励分配权重)
-    /// @dev 只能在session开始前修改
+    /// @notice 提取指定session未使用的boost奖励(仅在totalBoostPoints为0时可调用)
+    /// @dev 只有owner可以调用，且只能在session结束后
     /// @param _sessionId Session ID
-    /// @param _gamma gamma值(scaled by 1e18), 范围[0, 1e18], 建议0.5e18~0.7e18
-    function setGamma(uint256 _sessionId, uint256 _gamma)
+    function recoverUnusedBoostReward(uint256 _sessionId)
         external
         onlyOwner
         sessionExists(_sessionId)
+        sessionEnded(_sessionId)
     {
         Session storage session = sessions[_sessionId];
-        require(block.timestamp < session.startTime, "Cannot modify gamma after session started");
-        require(_gamma <= SCALER, "Gamma must be <= 1e18");
+        require(session.totalBoostPoints == 0, "Boost points exist, cannot recover");
 
-        session.gamma = _gamma;
+        uint256 amount = session.checkInRewardPool;
+        require(amount > 0, "No boost reward to recover");
+
+        // 重置奖池金额，防止重复提取
+        session.checkInRewardPool = 0;
+
+        // 转出boost奖励代币到owner
+        _safeTransfer(session.checkInRewardToken, owner(), amount);
     }
 
     // ============================================
@@ -248,7 +252,7 @@ contract Staking is Ownable, ReentrancyGuard {
         _processDeposit(_sessionId, _amount);
     }
 
-    /// @notice 用户签到(需距离上次签到至少5分钟)
+    /// @notice 用户签到(需距离上次签到至少5分钟且质押量≥5 LP)
     /// @param _sessionId Session ID
     function checkIn(uint256 _sessionId)
         external
@@ -259,18 +263,18 @@ contract Staking is Ownable, ReentrancyGuard {
         UserInfo storage user = userInfo[_sessionId][msg.sender];
         Session storage session = sessions[_sessionId];
 
-        require(user.amount > 0, "Must stake before check-in");
+        require(user.amount >= 5 ether, "Must stake at least 5 LP to check-in");
         require(block.timestamp >= user.lastCheckInTime + 300, "Check-in cooldown not expired");
 
-        // 更新全局加权质押量: 从 (amount * oldBoost) 变为 (amount * newBoost)
-        uint256 oldWeightedStake = user.amount * user.boost;
-        user.boost += 1;
-        uint256 newWeightedStake = user.amount * user.boost;
+        // 根据当前质押量判定档位并获取点数
+        uint256 points = _getTierPoints(user.amount);
+        require(points > 0, "Staked amount below minimum tier");
 
-        session.totalWeightedStake = session.totalWeightedStake - oldWeightedStake + newWeightedStake;
+        // 增加用户累计点数
+        user.boost += points;
 
-        // 更新全局boost点数总和 (新增)
-        session.totalBoostPoints += 1;
+        // 更新全局点数总和
+        session.totalBoostPoints += points;
 
         // 更新最后签到时间
         user.lastCheckInTime = uint40(block.timestamp);
@@ -333,7 +337,7 @@ contract Staking is Ownable, ReentrancyGuard {
         return accumulated;
     }
 
-    /// @notice 查询用户的boost奖励(使用新的分池权重法)
+    /// @notice 查询用户的boost奖励(基于点数分配)
     /// @param _sessionId Session ID
     /// @param _user 用户地址
     /// @return boost奖励数量
@@ -345,53 +349,6 @@ contract Staking is Ownable, ReentrancyGuard {
     {
         UserInfo storage user = userInfo[_sessionId][_user];
         return _calculateCheckInReward(_sessionId, user);
-    }
-
-    /// @notice 查询用户的boost奖励分解(stake部分和hybrid部分)
-    /// @param _sessionId Session ID
-    /// @param _user 用户地址
-    /// @return stakeReward stake部分的奖励: γ × totalBoostPool × (userStake / totalStake)
-    /// @return hybridReward hybrid部分的奖励: (1-γ) × totalBoostPool × (userStake × userBoost) / Σ(allStake × allBoost)
-    function getBoostRewardBreakdown(uint256 _sessionId, address _user)
-        external
-        view
-        sessionExists(_sessionId)
-        returns (uint256 stakeReward, uint256 hybridReward)
-    {
-        Session storage session = sessions[_sessionId];
-        UserInfo storage user = userInfo[_sessionId][_user];
-
-        // 基础检查
-        if (user.amount == 0 || session.totalStaked == 0 || user.boost == 0) {
-            return (0, 0);
-        }
-
-        uint256 totalBoostPool = session.checkInRewardPool;
-        uint256 gamma = session.gamma;
-
-        // 1) 计算stake部分: γ × totalBoostPool × (userStake / totalStake)
-        uint256 stakePart = (totalBoostPool * gamma) / SCALER;
-        uint256 stakeShare1e18 = (user.amount * SCALER) / session.totalStaked;
-        stakeReward = (stakePart * stakeShare1e18) / SCALER;
-
-        // 2) 计算hybrid部分: (1-γ) × totalBoostPool × (userStake × userBoost) / Σ(allStake × allBoost)
-        uint256 hybridPart = totalBoostPool - stakePart;
-
-        // 注意: 由于上面已经检查了 user.boost > 0，所以这里 totalBoostPoints 必然 > 0
-        // 因为至少当前用户有 boost。不需要检查 totalBoostPoints == 0 的情况。
-
-        uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
-        uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
-        uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
-
-        if (sumSB1e18 > 0) {
-            hybridReward = (hybridPart * sb1e18) / sumSB1e18;
-        } else {
-            // fallback: 按stake分 (理论上不应该到达这里，因为至少当前用户有 weightedStake)
-            hybridReward = (hybridPart * stakeShare1e18) / SCALER;
-        }
-
-        return (stakeReward, hybridReward);
     }
 
     /// @notice 查询用户的所有待领取奖励(质押奖励 + boost奖励)
@@ -473,9 +430,7 @@ contract Staking is Ownable, ReentrancyGuard {
             rewardPerSecond: params.totalReward / (params.endTime - params.startTime),
             accRewardPerShare: 0,
             lastRewardTime: params.startTime,
-            totalWeightedStake: 0,
             totalBoostPoints: 0,
-            gamma: 6e17, // 默认0.6 = 0.6 * 1e18
             active: true
         });
 
@@ -504,8 +459,8 @@ contract Staking is Ownable, ReentrancyGuard {
         // 标记已提取，防止重复提取
         user.hasWithdrawn = true;
 
-        // 注意: 我们不更新 totalStaked 和 totalWeightedStake
-        // 因为boost奖励应该基于session结束时的最终状态，而不是提取时的动态状态
+        // 注意: 我们不更新 totalStaked 和 totalBoostPoints
+        // 因为奖励应该基于session结束时的最终状态，而不是提取时的动态状态
         // 如果更新这些值，会导致后提取的用户获得不公平的高额奖励
 
         // 转出所有代币
@@ -514,62 +469,25 @@ contract Staking is Ownable, ReentrancyGuard {
         emit Withdrawn(_sessionId, msg.sender, stakedAmount, lpReward, checkInReward, block.timestamp);
     }
 
-    /// @notice 计算boost奖励(使用分池权重法)
+    /// @notice 计算boost奖励(基于点数分配)
     /// @param _sessionId Session ID
     /// @param user 用户信息
     /// @return boost奖励数量
     function _calculateCheckInReward(uint256 _sessionId, UserInfo storage user) internal view returns (uint256) {
         Session storage session = sessions[_sessionId];
 
-        // 如果用户没有质押,返回0
-        if (user.amount == 0 || session.totalStaked == 0) {
-            return 0;
-        }
-
-        // 如果用户从未签到，不应获得boost奖励
+        // 如果用户没有点数，返回0
         if (user.boost == 0) {
             return 0;
         }
 
-        uint256 totalBoostPool = session.checkInRewardPool;
-        uint256 gamma = session.gamma;
-
-        // 1) 计算stake部分: γ * totalBoostPool * (userStaked / totalStaked)
-        uint256 stakePart = (totalBoostPool * gamma) / SCALER;
-        uint256 stakeShare1e18 = (user.amount * SCALER) / session.totalStaked;
-        uint256 rewardFromStake = (stakePart * stakeShare1e18) / SCALER;
-
-        // 2) 计算hybrid部分: (1-γ) * totalBoostPool * (s_i*b_i) / Σ(s*b)
-        uint256 hybridPart = totalBoostPool - stakePart;
-        uint256 rewardFromHybrid = 0;
-
-        // 注意: 由于上面已经检查了 user.boost > 0，所以这里 totalBoostPoints 必然 > 0
-        // 因为至少当前用户有 boost。不需要检查 totalBoostPoints == 0 的情况。
-
-        // 计算用户的 s_i * b_i
-        // s_i = user.amount / totalStaked (scaled by 1e18)
-        // b_i = user.boost / totalBoostPoints (scaled by 1e18)
-        // s_i * b_i = (s_i * b_i) / 1e18
-        uint256 b1e18 = (user.boost * SCALER) / session.totalBoostPoints;
-        uint256 sb1e18 = (stakeShare1e18 * b1e18) / SCALER;
-
-        // Σ(s*b) 的计算:
-        // 注意 Σ(s_i * b_i) = Σ((stake_i/totalStaked) * (boost_i/totalBoost))
-        //                    = (1/(totalStaked * totalBoost)) * Σ(stake_i * boost_i)
-        //                    = totalWeightedStake / (totalStaked * totalBoost)
-        // 因为 sb_i 已经是 1e18 scaled, sumSB 也应该是 1e18 scaled
-        // sumSB1e18 = (totalWeightedStake / totalStaked) * (SCALER / totalBoostPoints)
-        //           = (totalWeightedStake * SCALER) / (totalStaked * totalBoostPoints)
-        uint256 sumSB1e18 = (session.totalWeightedStake * SCALER) / (session.totalStaked * session.totalBoostPoints);
-
-        if (sumSB1e18 > 0) {
-            rewardFromHybrid = (hybridPart * sb1e18) / sumSB1e18;
-        } else {
-            // fallback: 按stake分 (理论上不应该到达这里，因为至少当前用户有 weightedStake)
-            rewardFromHybrid = (hybridPart * stakeShare1e18) / SCALER;
+        // 如果全局点数为0，返回0
+        if (session.totalBoostPoints == 0) {
+            return 0;
         }
 
-        return rewardFromStake + rewardFromHybrid;
+        // 奖励 = 奖池 × (用户点数 / 总点数)
+        return (session.checkInRewardPool * user.boost) / session.totalBoostPoints;
     }
 
     /// @notice 转出提取的代币
@@ -613,14 +531,6 @@ contract Staking is Ownable, ReentrancyGuard {
             if (pending > 0) {
                 user.accumulatedReward += pending;
             }
-        }
-
-        // 如果用户已有boost,需要更新totalWeightedStake
-        if (user.boost > 0) {
-            // 从旧的amount*boost变为新的amount*boost
-            uint256 oldWeightedStake = user.amount * user.boost;
-            uint256 newWeightedStake = (user.amount + _amount) * user.boost;
-            session.totalWeightedStake = session.totalWeightedStake - oldWeightedStake + newWeightedStake;
         }
 
         // 更新用户状态
@@ -686,6 +596,25 @@ contract Staking is Ownable, ReentrancyGuard {
         require(!overlap, "Session time overlaps with existing session");
     }
 
+
+    /// @notice 根据质押量判定档位并返回对应点数
+    /// @param _amount 质押数量
+    /// @return 档位对应的点数(1-5)
+    function _getTierPoints(uint256 _amount) internal pure returns (uint256) {
+        if (_amount >= 50 ether) {
+            return 5;
+        } else if (_amount >= 30 ether) {
+            return 4;
+        } else if (_amount >= 20 ether) {
+            return 3;
+        } else if (_amount >= 10 ether) {
+            return 2;
+        } else if (_amount >= 5 ether) {
+            return 1;
+        } else {
+            return 0;
+        }
+    }
 
     /// @notice 安全转账函数(仅支持ERC20)
     /// @param _token 代币地址

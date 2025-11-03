@@ -224,12 +224,12 @@ contract StakingFlashLoanAttackTest is Test {
         console.log("Alice: 10 check-ins (95% time) but got only", 100 - charlieBoostPercentage, "%");
 
         // 分解查看
-        (uint256 aliceStakeReward, uint256 aliceHybridReward) = staking.getBoostRewardBreakdown(sessionId, alice);
-        (uint256 charlieStakeReward, uint256 charlieHybridReward) = staking.getBoostRewardBreakdown(sessionId, charlie);
+        // (uint256 aliceStakeReward, uint256 aliceHybridReward) =  staking.getBoostRewardBreakdown(sessionId, alice);
+        // (uint256 charlieStakeReward, uint256 charlieHybridReward) =  staking.getBoostRewardBreakdown(sessionId, charlie);
 
         console.log("\n=== Reward Breakdown ===");
-        console.log("Alice - Stake part:", aliceStakeReward / 10**18, ", Hybrid part:", aliceHybridReward / 10**18);
-        console.log("Charlie - Stake part:", charlieStakeReward / 10**18, ", Hybrid part:", charlieHybridReward / 10**18);
+        //         console.log("Alice - Stake part:", aliceStakeReward / 10**18, ", Hybrid part:", aliceHybridReward / 10**18);
+        //         console.log("Charlie - Stake part:", charlieStakeReward / 10**18, ", Hybrid part:", charlieHybridReward / 10**18);
 
         console.log("\n=== Critical Issue ===");
         console.log("The stake part of boost reward is distributed by amount ratio,");
